@@ -1,0 +1,1156 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>TCPD Fast 運作說明</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@400;600;700&family=Noto+Sans+TC:wght@400;500;700&display=swap">
+<style>
+/* Layout: sticky left contents list + one reading column; wide tables and diagrams scroll inside their own frames.
+   Colour roles: blue = input / P wave, teal = output to downstream, orange = S wave only. */
+:root{
+  color-scheme:light;
+  --bg:#f2f5f7; --surface:#ffffff; --surface-2:#e8eef2;
+  --ink:#12202b; --ink-2:#44545f; --ink-3:#66777f;
+  --line:#d3dce2; --line-2:#b4c1ca;
+  --accent:#1c5da3; --accent-soft:#dbe8f6;
+  --out:#0d7468; --out-soft:#d4ece8;
+  --swave:#b0481a; --swave-soft:#f5e3d8;
+  --warn:#8f5b00; --warn-soft:#f7edd3; --ok:#27704a; --crit:#b3261e;
+  --code-bg:#e9eff3; --code-ink:#16313f;
+  --font-body:'IBM Plex Sans','Noto Sans TC','PingFang TC','Microsoft JhengHei',system-ui,sans-serif;
+  --font-mono:'IBM Plex Mono',ui-monospace,SFMono-Regular,Menlo,Consolas,'Noto Sans TC','Microsoft JhengHei',monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#0e151b; --surface:#141e26; --surface-2:#1b2832;
+    --ink:#e4ebf0; --ink-2:#a3b3bf; --ink-3:#8496a3;
+    --line:#2a3a46; --line-2:#3d5160;
+    --accent:#7db7f0; --accent-soft:#17314b;
+    --out:#4fc2b2; --out-soft:#13342f;
+    --swave:#f0996a; --swave-soft:#3b2518;
+    --warn:#e4b254; --warn-soft:#352a10; --ok:#6fcf9a; --crit:#ff8a80;
+    --code-bg:#0b1218; --code-ink:#cfe0ea;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0e151b; --surface:#141e26; --surface-2:#1b2832;
+  --ink:#e4ebf0; --ink-2:#a3b3bf; --ink-3:#8496a3;
+  --line:#2a3a46; --line-2:#3d5160;
+  --accent:#7db7f0; --accent-soft:#17314b;
+  --out:#4fc2b2; --out-soft:#13342f;
+  --swave:#f0996a; --swave-soft:#3b2518;
+  --warn:#e4b254; --warn-soft:#352a10; --ok:#6fcf9a; --crit:#ff8a80;
+  --code-bg:#0b1218; --code-ink:#cfe0ea;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+@media (prefers-reduced-motion:no-preference){html{scroll-behavior:smooth}}
+body{background:var(--bg);color:var(--ink);font:16px/1.75 var(--font-body);-webkit-text-size-adjust:100%;overflow-wrap:break-word}
+a{color:var(--accent)}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:3px}
+
+.wrap{max-width:1220px;margin-inline:auto;padding-inline:clamp(16px,4vw,40px);padding-block:32px 80px}
+
+/* ---------- hero ---------- */
+.hero{padding-bottom:30px;margin-bottom:34px;border-bottom:1px solid var(--line)}
+.eyebrow{font:600 12px/1 var(--font-mono);letter-spacing:.14em;text-transform:uppercase;color:var(--accent)}
+h1{font-size:clamp(30px,5.2vw,48px);line-height:1.18;margin:.45em 0 .35em;font-weight:700;letter-spacing:-.01em;text-wrap:balance}
+.lede{max-width:44em;color:var(--ink-2);font-size:17px;margin:0}
+.meta{display:flex;flex-wrap:wrap;gap:8px;margin-top:18px}
+.meta span{font:12px/1 var(--font-mono);padding:6px 11px;border:1px solid var(--line);border-radius:999px;color:var(--ink-2);background:var(--surface)}
+
+/* ---------- layout / toc ---------- */
+.layout{display:grid;grid-template-columns:208px minmax(0,1fr);gap:clamp(28px,4vw,56px);align-items:start}
+.toc{position:sticky;top:20px;max-height:calc(100vh - 40px);overflow:auto;font-size:14px}
+.toc-title{font:600 11px/1 var(--font-mono);letter-spacing:.14em;color:var(--ink-3);margin:0 0 10px 10px;text-transform:uppercase}
+.toc ul{list-style:none;margin:0;padding:0}
+.toc a{display:block;padding:5px 10px;color:var(--ink-2);text-decoration:none;border-radius:6px;line-height:1.5}
+.toc a:hover{background:var(--surface-2);color:var(--ink)}
+.toc a[aria-current="true"]{background:var(--accent-soft);color:var(--accent);font-weight:600}
+@media (max-width:960px){
+  .layout{grid-template-columns:minmax(0,1fr);gap:0}
+  .toc{position:sticky;top:env(safe-area-inset-top,0px);z-index:5;max-height:none;overflow-x:auto;overflow-y:hidden;
+       margin-inline:calc(-1*clamp(16px,4vw,40px));padding:8px clamp(16px,4vw,40px);background:var(--bg);border-bottom:1px solid var(--line)}
+  .toc-title{display:none}
+  .toc ul{display:flex;gap:4px;white-space:nowrap}
+}
+
+/* ---------- sections ---------- */
+main{min-width:0}
+main>section{padding-block:40px;border-top:1px solid var(--line);scroll-margin-top:12px}
+main>section:first-child{border-top:0;padding-top:0}
+h2{font-size:clamp(24px,3.4vw,31px);line-height:1.28;margin:0 0 .55em;text-wrap:balance;letter-spacing:-.005em}
+h3{font-size:19px;line-height:1.4;margin:2em 0 .5em;text-wrap:balance}
+h4{font-size:16px;margin:1.4em 0 .3em;color:var(--ink-2)}
+p,ul.txt,ol.txt{max-width:43em}
+p{margin:.75em 0}
+ul.txt,ol.txt{margin:.6em 0;padding-left:1.4em}
+ul.txt li,ol.txt li{margin:.3em 0}
+.sub{color:var(--ink-2)}
+strong{font-weight:600}
+
+code{font:.88em/1.4 var(--font-mono);background:var(--code-bg);color:var(--code-ink);padding:.12em .4em;border-radius:4px;overflow-wrap:anywhere}
+pre{font:13px/1.7 var(--font-mono);background:var(--code-bg);color:var(--code-ink);padding:14px 16px;border-radius:8px;overflow-x:auto;margin:1em 0;border:1px solid var(--line);white-space:pre;tab-size:4}
+pre code{background:none;padding:0;font-size:inherit;overflow-wrap:normal}
+pre .c-info{color:var(--ok)} pre .c-warn{color:var(--warn)} pre .c-err{color:var(--crit)} pre .c-dim{color:var(--ink-3)} pre .c-tag{color:var(--accent)}
+pre .c-h{color:var(--accent);font-weight:600}
+.formula{font:14px/1.9 var(--font-mono);background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:10px 16px;margin:1em 0;overflow-x:auto;white-space:pre;max-width:100%}
+
+/* ---------- tables ---------- */
+.tw{overflow-x:auto;margin:1.1em 0;border:1px solid var(--line);border-radius:8px;background:var(--surface)}
+table{border-collapse:collapse;width:100%;min-width:600px;font-size:14.5px;line-height:1.65}
+th,td{padding:9px 13px;text-align:left;vertical-align:top;border-bottom:1px solid var(--line)}
+th{background:var(--surface-2);font-weight:600;font-size:13px;color:var(--ink-2);white-space:nowrap}
+tr:last-child>td{border-bottom:0}
+tr.grp td{background:var(--surface-2);font-weight:600;font-size:13px;color:var(--ink-2);letter-spacing:.02em}
+td.num,th.num{text-align:right;font-variant-numeric:tabular-nums}
+td.nw{white-space:nowrap}
+.tag{display:inline-block;font:600 11.5px/1 var(--font-mono);padding:4px 7px;border-radius:5px;white-space:nowrap}
+.tag.cfg{color:var(--accent);background:var(--accent-soft)}
+.tag.hard{color:var(--warn);background:var(--warn-soft)}
+.tag.dbg{color:var(--ink-3);background:var(--surface-2)}
+
+/* ---------- notes ---------- */
+.note{margin:1.3em 0;padding:13px 17px;border-radius:8px;background:var(--surface-2);border:1px solid var(--line);max-width:46em;font-size:15px;line-height:1.7}
+.note .k{display:block;font:600 11.5px/1 var(--font-mono);letter-spacing:.1em;text-transform:uppercase;margin-bottom:6px;color:var(--accent)}
+.note.warn{background:var(--warn-soft);border-color:transparent}
+.note.warn .k{color:var(--warn)}
+.note p{margin:.4em 0}
+
+/* ---------- figures ---------- */
+figure{margin:1.5em 0}
+.fig{overflow-x:auto;border:1px solid var(--line);border-radius:10px;background:var(--surface);padding:14px}
+.fig svg{display:block;width:100%;height:auto;min-width:var(--minw,700px);color:var(--ink);overflow:visible}
+figcaption{font-size:14px;color:var(--ink-2);margin-top:9px;max-width:46em;line-height:1.65}
+svg text{font-family:var(--font-body)}
+svg .lbl{font-size:13px;fill:var(--ink-2)}
+svg .cap{font-size:11.5px;fill:var(--ink-3);letter-spacing:.06em}
+svg .ttl{font-size:14.5px;font-weight:600;fill:var(--ink)}
+svg .tick{font-size:11.5px;fill:var(--ink-3);font-variant-numeric:tabular-nums}
+svg .box{fill:var(--surface-2);stroke:var(--line-2);stroke-width:1.2}
+svg .box-core{fill:var(--surface);stroke:var(--line-2);stroke-width:1.4;stroke-dasharray:none}
+svg .box-core2{fill:var(--surface-2);stroke:var(--ink-3);stroke-width:1.6}
+svg .box-in{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.4}
+svg .box-out{fill:var(--out-soft);stroke:var(--out);stroke-width:1.4}
+svg .arr{stroke:var(--ink-3);stroke-width:1.7;fill:none}
+svg .arr-b{stroke:var(--accent)} svg .arr-t{stroke:var(--out)}
+svg .mk-g{fill:var(--ink-3)} svg .mk-b{fill:var(--accent)} svg .mk-t{fill:var(--out)}
+svg .grid{stroke:var(--line);stroke-width:1}
+svg .axis{stroke:var(--ink-3);stroke-width:1.4}
+svg .mark{stroke:var(--ink-3);stroke-width:1;stroke-dasharray:3 4}
+svg .ln-p{stroke:var(--accent);stroke-width:2.6;stroke-linejoin:round}
+svg .ln-s{stroke:var(--swave);stroke-width:2.6;stroke-linejoin:round}
+svg .ln-sp{stroke:var(--ink-3);stroke-width:2;stroke-dasharray:6 5}
+svg .lbl-p{font-size:13px;font-weight:600;fill:var(--accent)} svg .lbl-s{font-size:13px;font-weight:600;fill:var(--swave)}
+svg .dot-p{fill:var(--accent)} svg .dot-s{fill:var(--swave)} svg .dot-sp{fill:var(--ink-3)}
+
+/* ---------- overview strip ---------- */
+.steps5{display:flex;flex-direction:column;gap:8px;margin:1.4em 0;padding:0;list-style:none;counter-reset:s5}
+.steps5 li{counter-increment:s5;display:grid;grid-template-columns:28px 8.5em 1fr;column-gap:12px;align-items:baseline;background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:12px 16px;font-size:14.5px;line-height:1.65}
+.steps5 li::before{content:counter(s5);font:600 13px/1 var(--font-mono);color:var(--accent)}
+.steps5 b{font-size:16px}
+@media (max-width:640px){
+  .steps5 li{grid-template-columns:24px 1fr;row-gap:2px}
+  .steps5 li::before{grid-row:1}
+  .steps5 b{grid-column:2}
+  .steps5 li>span{grid-column:2}
+}
+.pair{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px;margin:1.2em 0}
+.pair>div{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:14px 18px}
+.pair h4{margin:0 0 .4em;color:var(--ink)}
+.pair ul{margin:.3em 0;padding-left:1.2em;font-size:14.5px}
+
+/* ---------- vertical flow ---------- */
+.flow{list-style:none;margin:1.3em 0;padding:0;counter-reset:st}
+.flow>li{display:grid;grid-template-columns:34px minmax(0,1fr) minmax(0,16em);gap:4px 14px;position:relative;padding-bottom:16px}
+.flow>li::before{content:"";position:absolute;left:16px;top:36px;bottom:0;width:2px;background:var(--line)}
+.flow>li:last-child::before{display:none}
+.flow .dot{counter-increment:st;grid-row:1;width:34px;height:34px;display:grid;place-items:center;border:2px solid var(--accent);background:var(--surface);color:var(--accent);font:600 13px/1 var(--font-mono);border-radius:50%}
+.flow .dot::before{content:counter(st)}
+.flow .dec .dot{border-radius:9px}
+.flow .node{grid-row:1;min-width:0;padding-top:3px}
+.flow .node b{font-weight:600}
+.flow .node small{display:block;color:var(--ink-2);font-size:14px;line-height:1.65;margin-top:2px}
+.flow .kind{font:600 10.5px/1 var(--font-mono);letter-spacing:.08em;color:var(--ink-3);border:1px solid var(--line-2);border-radius:4px;padding:2px 5px;margin-right:6px;vertical-align:1px}
+.flow .exit{grid-row:1;align-self:start;font-size:13px;line-height:1.55;padding:6px 10px;border:1px dashed var(--warn);border-radius:8px;color:var(--warn);background:var(--warn-soft);min-width:0}
+.flow .exit.go{border-color:var(--out);color:var(--out);background:var(--out-soft)}
+.flow .exit b{font-weight:700}
+@media (max-width:760px){
+  .flow>li{grid-template-columns:34px minmax(0,1fr)}
+  .flow .exit{grid-row:2;grid-column:2;justify-self:start}
+}
+
+/* ---------- calculator ---------- */
+.calc{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:16px 18px;margin:1.3em 0;max-width:46em}
+.calc h4{margin:0 0 .6em;color:var(--ink)}
+.calc .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:12px}
+.calc label{display:block;font-size:13px;color:var(--ink-2)}
+.calc input,.calc select{display:block;width:100%;margin-top:4px;padding:8px 10px;font:15px var(--font-mono);color:var(--ink);background:var(--bg);border:1px solid var(--line-2);border-radius:6px}
+.calc .out{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-top:16px}
+.calc .out div{background:var(--surface-2);border-radius:8px;padding:10px 12px;font-size:13px;color:var(--ink-2)}
+.calc .out b{display:block;font:600 22px/1.3 var(--font-mono);color:var(--ink);font-variant-numeric:tabular-nums}
+.calc .hint{font-size:13px;color:var(--ink-3);margin:12px 0 0}
+
+details{margin:1em 0;border:1px solid var(--line);border-radius:8px;background:var(--surface)}
+details>summary{cursor:pointer;padding:10px 14px;font-weight:600;font-size:15px}
+details>.tw,details>div.inner{margin:0;border:0;border-top:1px solid var(--line);border-radius:0 0 8px 8px}
+details>div.inner{padding:4px 16px 12px}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin:.7em 0;padding:0;list-style:none}
+.chips li{font:13px/1 var(--font-mono);padding:6px 9px;border-radius:6px;background:var(--surface);border:1px solid var(--line)}
+.chips.sp li{border-color:var(--swave);color:var(--swave);background:var(--swave-soft)}
+footer{margin-top:40px;padding-top:20px;border-top:1px solid var(--line);color:var(--ink-3);font-size:13px}
+.tw td:first-child code{white-space:nowrap}
+
+</style>
+</head>
+<body>
+<div class="wrap">
+<header class="hero">
+  <div class="eyebrow">go-tcpd-fast · 程式運作說明</div>
+  <h1>TCPD Fast 運作說明</h1>
+  <p class="lede">go-tcpd-fast 接收測站的 P 波 pick，在記憶體內完成觸發判定、定位與規模估算，再把速報以 Earthworm Link 格式送給下游。本頁依 TCPD_Source 原始碼整理，用來對照需求，也作為後續開發的依據。</p>
+  <div class="meta"><span>Go 1.23.1</span><span>原始碼約 3,650 行</span><span>整理於 2026-10-13</span><span>靜態閱讀，尚未編譯執行</span></div>
+</header>
+
+<div class="layout">
+<nav class="toc" aria-label="章節">
+  <p class="toc-title">章節</p>
+  <ul>
+    <li><a href="#overview">概觀</a></li>
+    <li><a href="#arch">程式架構</a></li>
+    <li><a href="#pick">Pick 資料界接</a></li>
+    <li><a href="#flow">演算邏輯</a></li>
+    <li><a href="#trigger">觸發條件與門檻</a></li>
+    <li><a href="#locate">地震定位</a></li>
+    <li><a href="#mag">規模計算</a></li>
+    <li><a href="#stop">事件結束條件</a></li>
+    <li><a href="#down">傳遞到下游</a></li>
+    <li><a href="#params">地震參數</a></li>
+    <li><a href="#rep">.rep 報告檔</a></li>
+    <li><a href="#log">日誌檔</a></li>
+    <li><a href="#config">設定檔</a></li>
+    <li><a href="#ops">監控與部署</a></li>
+    <li><a href="#issues">待確認事項</a></li>
+  </ul>
+</nav>
+
+<main>
+
+<!-- ============ 概觀 ============ -->
+<section id="overview">
+  <h2>概觀</h2>
+  <p>一個地震事件從 pick 進來到速報送出，會經過下列五個階段。各階段的細節在後面的章節。</p>
+  <ol class="steps5">
+    <li><b>接收 pick</b><span>上游以 TCP 連入 :16001，每筆是 14 個欄位的文字。</span></li>
+    <li><b>觸發判定</b><span>篩選後的觸發站要有 4 站以上，才會進入計算。</span></li>
+    <li><b>定位與規模</b><span>第 1–3 報用形心法，第 4 報起用 Geiger 疊代加深度網格；規模取 Mpd，並參考 Mtc。</span></li>
+    <li><b>發報</b><span>觸發站數每增加一次就重算再發，最多 11 份；前 3 份要通過 10 秒與 PGA 閘門。</span></li>
+    <li><b>結束</b><span>首報後 60 秒，或站數連續減少，就清空狀態等下一個地震。</span></li>
+  </ol>
+  <div class="pair">
+    <div>
+      <h4>輸入</h4>
+      <ul>
+        <li>P 波 pick：TCP :16001，Type 150，每筆 14 個文字欄位</li>
+        <li>上游心跳：Type 3</li>
+        <li>YAML 設定檔：預設 <code>tcpd_fast.yaml</code></li>
+      </ul>
+    </div>
+    <div>
+      <h4>輸出</h4>
+      <ul>
+        <li>EEW 速報：TCP 連往下游，Type 150，19 個文字欄位</li>
+        <li>心跳：每 15 秒一次</li>
+        <li><code>.rep</code> 詳細報告檔，依事件分資料夾</li>
+        <li>三份日誌，以及 :8080 的 Prometheus 指標</li>
+      </ul>
+    </div>
+  </div>
+  <div class="note"><span class="k">名詞</span>
+    <p><b>pick</b>：測站偵測到 P 波後送出的一筆資料。<b>觸發站</b>：通過篩選、參與本次計算的測站。<b>報告</b>：一份 EEW 速報。<b>事件</b>：同一個地震的連續報告，共用同一個事件編號（<code>numEew</code>）。</p>
+  </div>
+</section>
+
+<!-- ============ 程式架構 ============ -->
+<section id="arch">
+  <h2>程式架構</h2>
+  <p>整個服務是一個行程。pick 從左邊進來，經過一條有容量的佇列交給單一的計算引擎，引擎產生的報告交給送出端；日誌與指標由所有元件共用。</p>
+  <figure>
+    <div class="fig"><svg viewBox="0 0 1020 500" role="img" aria-label="tcpd-fast 的資料流：上游 pick 經 pickreceiver、pickCh、eewengine、eewsender 送往下游 import_ew，並輸出 .rep、日誌與監控指標" xmlns="http://www.w3.org/2000/svg"><defs><marker id="arg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mk-g"/></marker><marker id="arb" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mk-b"/></marker><marker id="art" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mk-t"/></marker></defs><rect x="8" y="150" width="130" height="100" rx="8" class="box-in"/><text x="73.0" y="187.0" class="ttl" text-anchor="middle">上游 pick 來源</text><text x="73.0" y="209.0" class="lbl" text-anchor="middle">export_ew</text><text x="73.0" y="227.0" class="lbl" text-anchor="middle">export_gen_actv</text><rect x="878" y="150" width="134" height="100" rx="8" class="box-out"/><text x="945.0" y="187.0" class="ttl" text-anchor="middle">下游</text><text x="945.0" y="209.0" class="lbl" text-anchor="middle">import_ew</text><text x="945.0" y="227.0" class="lbl" text-anchor="middle">(DCSN)</text><rect x="228" y="96" width="560" height="300" rx="14" class="box-core"/><text x="244" y="122" class="ttl" text-anchor="start">tcpd-fast（單一行程）</text><rect x="244" y="150" width="130" height="100" rx="8" class="box-in"/><text x="309.0" y="178.0" class="ttl" text-anchor="middle">pickreceiver</text><text x="309.0" y="200.0" class="lbl" text-anchor="middle">TCP 伺服器</text><text x="309.0" y="218.0" class="lbl" text-anchor="middle">每條連線一個</text><text x="309.0" y="236.0" class="lbl" text-anchor="middle">goroutine 解包</text><rect x="443" y="150" width="130" height="100" rx="8" class="box-core2"/><text x="508.0" y="178.0" class="ttl" text-anchor="middle">eewengine</text><text x="508.0" y="200.0" class="lbl" text-anchor="middle">單一事件迴圈</text><text x="508.0" y="218.0" class="lbl" text-anchor="middle">過濾·觸發</text><text x="508.0" y="236.0" class="lbl" text-anchor="middle">定位·規模·發報</text><rect x="642" y="150" width="130" height="100" rx="8" class="box-out"/><text x="707.0" y="178.0" class="ttl" text-anchor="middle">eewsender</text><text x="707.0" y="200.0" class="lbl" text-anchor="middle">TCP 用戶端</text><text x="707.0" y="218.0" class="lbl" text-anchor="middle">背景重連</text><text x="707.0" y="236.0" class="lbl" text-anchor="middle">訊框封裝·心跳</text><line x1="138" y1="200" x2="244" y2="200" class="arr arr-b" marker-end="url(#arb)"/><text x="191" y="172" class="lbl" text-anchor="middle">上游連入</text><text x="191" y="189" class="lbl" text-anchor="middle">:16001</text><text x="191" y="222" class="lbl" text-anchor="middle">Type 150 pick</text><text x="191" y="238" class="lbl" text-anchor="middle">Type 3 心跳</text><line x1="374" y1="200" x2="443" y2="200" class="arr arr-b" marker-end="url(#arb)"/><text x="408.5" y="190" class="lbl" text-anchor="middle">pickCh</text><text x="408.5" y="222" class="lbl" text-anchor="middle">容量 256</text><line x1="573" y1="200" x2="642" y2="200" class="arr arr-t" marker-end="url(#art)"/><text x="607.5" y="190" class="lbl" text-anchor="middle">Send()</text><text x="607.5" y="222" class="lbl" text-anchor="middle">EEW 字串</text><line x1="772" y1="200" x2="878" y2="200" class="arr arr-t" marker-end="url(#art)"/><text x="825" y="172" class="lbl" text-anchor="middle">連往</text><text x="825" y="189" class="lbl" text-anchor="middle">:16002</text><text x="825" y="222" class="lbl" text-anchor="middle">Type 150 EEW</text><text x="825" y="238" class="lbl" text-anchor="middle">Type 3 心跳</text><text x="244" y="284" class="cap" text-anchor="start">共用元件</text><rect x="244" y="294" width="150" height="56" rx="8" class="box"/><text x="319.0" y="318.0" class="ttl" text-anchor="middle">config</text><text x="319.0" y="340.0" class="lbl" text-anchor="middle">啟動時載入 YAML</text><rect x="412" y="294" width="180" height="56" rx="8" class="box"/><text x="502.0" y="318.0" class="ttl" text-anchor="middle">Logger</text><text x="502.0" y="340.0" class="lbl" text-anchor="middle">service·network·event</text><rect x="610" y="294" width="162" height="56" rx="8" class="box"/><text x="691.0" y="318.0" class="ttl" text-anchor="middle">metrics</text><text x="691.0" y="340.0" class="lbl" text-anchor="middle">HTTP :8080/metrics</text><rect x="412" y="22" width="192" height="50" rx="8" class="box-out"/><text x="508.0" y="43.0" class="ttl" text-anchor="middle">.rep 報告檔</text><text x="508.0" y="65.0" class="lbl" text-anchor="middle">eew-output-dir 下依事件分層</text><line x1="508" y1="150" x2="508" y2="72" class="arr arr-t" marker-end="url(#art)"/><text x="516" y="118" class="lbl" text-anchor="start">每份報告</text><rect x="372" y="432" width="236" height="56" rx="8" class="box"/><text x="490.0" y="447.0" class="ttl" text-anchor="middle">日誌檔 logs/</text><text x="490.0" y="469.0" class="lbl" text-anchor="middle">service/ network/ event/</text><text x="490.0" y="487.0" class="lbl" text-anchor="middle">→ Promtail → Loki</text><line x1="502" y1="350" x2="502" y2="432" class="arr" marker-end="url(#arg)"/><rect x="640" y="432" width="190" height="56" rx="8" class="box"/><text x="735.0" y="456.0" class="ttl" text-anchor="middle">Prometheus</text><text x="735.0" y="478.0" class="lbl" text-anchor="middle">每 5 秒抓取 → Grafana</text><line x1="700" y1="350" x2="700" y2="432" class="arr" marker-end="url(#arg)"/></svg></div>
+    <figcaption>藍色是輸入側，青綠色是往下游的輸出側。埠號是預設值，由 <code>pick-listen-addr</code>、<code>eew-send-addr</code>、<code>metrics-addr</code> 決定。</figcaption>
+  </figure>
+
+  <h3>模組分工</h3>
+  <div class="tw"><table>
+    <thead><tr><th>套件</th><th>檔案</th><th>職責</th></tr></thead>
+    <tbody>
+      <tr><td><code>main</code></td><td><code>cmd/tcpd-fast/main.go</code></td><td>解析命令列、建立三個 logger、啟動各元件、處理關機訊號。</td></tr>
+      <tr><td><code>config</code></td><td><code>config/config.go</code></td><td>載入 YAML；檔案裡沒寫的欄位沿用 <code>DefaultConfig()</code> 的預設值。</td></tr>
+      <tr><td><code>trigger</code></td><td><code>trigger/types.go</code></td><td>共用資料結構：<code>PickEntry</code>、<code>Hypocenter</code>、<code>MagnitudeResult</code>、<code>SCNL</code>。</td></tr>
+      <tr><td><code>pickreceiver</code></td><td><code>pickreceiver/receiver.go</code></td><td>TCP 伺服器、Earthworm 訊框解包、pick 解析、上游逾時偵測。</td></tr>
+      <tr><td rowspan="3"><code>eewengine</code></td><td><code>engine.go</code></td><td>事件狀態機：過濾、觸發、報告、<code>.rep</code> 輸出。</td></tr>
+      <tr><td><code>locaeq.go</code></td><td>震源定位（<code>Locaeq</code>、<code>LocaeqOri</code>）、<code>Delaz</code>、權重函數 <code>Wt</code>。</td></tr>
+      <tr><td><code>magnitude.go</code></td><td>規模（Mpd、Mtc、Padj）與 PGA 預估。</td></tr>
+      <tr><td><code>eewsender</code></td><td><code>eewsender/sender.go</code></td><td>下游 TCP 連線、重連、訊框封裝、心跳。</td></tr>
+      <tr><td><code>metrics</code></td><td><code>metrics/metrics.go</code></td><td>12 個 Prometheus 指標與 <code>/metrics</code> 伺服器。</td></tr>
+      <tr><td><code>Logger</code></td><td><code>Logger/logger.go</code></td><td>logrus 加 lumberjack 的日誌，每日午夜切檔。</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>執行緒（goroutine）一覽</h3>
+  <p>只有引擎會讀寫 pick 緩衝區，所以計算邏輯本身不需要鎖。其餘 goroutine 只負責進出資料。</p>
+  <div class="tw"><table>
+    <thead><tr><th>名稱</th><th>數量</th><th>工作</th></tr></thead>
+    <tbody>
+      <tr><td>引擎主迴圈（<code>Engine.Run</code>）</td><td>1，即 main</td><td>從 <code>pickCh</code> 取 pick 處理；每 100 ms 檢查事件是否逾時。</td></tr>
+      <tr><td>accept 迴圈</td><td>每個監聽位址 1</td><td>接受上游連線，為每條連線開一個處理 goroutine。</td></tr>
+      <tr><td><code>handleConn</code></td><td>每條連線 1</td><td>讀位元組、解包、解析 pick、推入 <code>pickCh</code>。</td></tr>
+      <tr><td>逾時檢查</td><td>每條連線 1</td><td>每 min(5 秒, <code>upstream-timeout</code> / 2) 檢查一次最後活躍時間。</td></tr>
+      <tr><td><code>connectLoop</code></td><td>1</td><td>維持對下游的 TCP 連線；失敗時指數退避重連。</td></tr>
+      <tr><td>斷線偵測讀取</td><td>每次連線 1</td><td>對下游連線讀 1 byte；下游正常不會送資料，讀到錯誤就代表斷線。</td></tr>
+      <tr><td>心跳計時器</td><td>1</td><td>每 <code>heartbeat-interval</code> 秒對下游送一次心跳。</td></tr>
+      <tr><td>metrics 伺服器</td><td>2</td><td>一個提供 HTTP，一個監看 Context 取消後優雅關閉（等待上限 5 秒）。</td></tr>
+      <tr><td>訊號處理</td><td>1</td><td>收到 <code>SIGINT</code> / <code>SIGTERM</code> 後取消 Context。</td></tr>
+      <tr><td>日誌切檔</td><td>3</td><td>每個 logger 一個，每天本機時間 00:00 強制切檔。</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>啟動與關機順序</h3>
+  <ol class="txt">
+    <li>解析命令列：<code>-c 設定檔</code>，或第一個位置參數；預設 <code>tcpd_fast.yaml</code>。</li>
+    <li>載入 YAML，建立 service、network、event 三個 logger。</li>
+    <li>啟動 Prometheus HTTP 伺服器。</li>
+    <li>註冊 <code>SIGINT</code> / <code>SIGTERM</code>。</li>
+    <li>建立容量 256 的 <code>pickCh</code>，啟動送出端，再為每個 pick 監聽位址啟動一個接收器；任何一個接收器啟動失敗就直接結束程式。</li>
+    <li>啟動定時心跳。</li>
+    <li>執行引擎主迴圈，直到 Context 被取消；收到結束訊號後各元件依 Context 收尾。</li>
+  </ol>
+
+  <div class="note"><span class="k">設計取捨</span>
+    <p><b>不回送心跳給上游。</b>上游的 <code>export_gen_actv</code> 自己會依 <code>SendAliveInt</code> 送心跳。本端若回送，會被它判定為 "weird heartbeat from client" 而自行終止重啟，pick 就送不進來。這個現象在實測中確認過，所以 <code>main</code> 沒有呼叫 <code>WithHeartbeat</code>。</p>
+    <p><b>下游斷線時報告不暫存。</b>連線不存在時 <code>Send</code> 直接回傳 "not connected"，引擎只記一筆警告，之後不會補送。</p>
+  </div>
+</section>
+
+<!-- ============ Pick 資料界接 ============ -->
+<section id="pick">
+  <h2>Pick 資料界接</h2>
+  <p>tcpd-fast 是 TCP <b>伺服器</b>，上游（<code>export_ew</code> 等）主動連進來。可以同時監聽多個位址：<code>pick-listen-addr</code> 與 <code>pick-listen-addrs</code> 會合併去重，每個位址各有一個接收器。這是為了讓不同測站網路各自送到不同的埠。</p>
+
+  <h3>訊框格式</h3>
+  <figure>
+    <div class="fig" style="--minw:700px"><svg viewBox="0 0 780 142" role="img" aria-label="Earthworm Link 訊框：STX、三位數 InstID、ModID、TypeID、本文、ETX" xmlns="http://www.w3.org/2000/svg"><defs><marker id="frg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mk-g"/></marker><marker id="frb" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mk-b"/></marker><marker id="frt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mk-t"/></marker></defs><rect x="20" y="52" width="70" height="46" rx="4" class="box"/><text x="55.0" y="80" class="ttl" text-anchor="middle">STX</text><text x="55.0" y="120" class="lbl" text-anchor="middle">1 byte</text><rect x="90" y="52" width="100" height="46" rx="4" class="box-in"/><text x="140.0" y="80" class="ttl" text-anchor="middle">InstID</text><text x="140.0" y="120" class="lbl" text-anchor="middle">3 字元 (%3d)</text><rect x="190" y="52" width="100" height="46" rx="4" class="box-in"/><text x="240.0" y="80" class="ttl" text-anchor="middle">ModID</text><text x="240.0" y="120" class="lbl" text-anchor="middle">3 字元 (%3d)</text><rect x="290" y="52" width="100" height="46" rx="4" class="box-in"/><text x="340.0" y="80" class="ttl" text-anchor="middle">TypeID</text><text x="340.0" y="120" class="lbl" text-anchor="middle">3 字元 (%3d)</text><rect x="390" y="52" width="300" height="46" rx="4" class="box-out"/><text x="540.0" y="80" class="ttl" text-anchor="middle">body 文字內容</text><text x="540.0" y="120" class="lbl" text-anchor="middle">STX / ETX / ESC 前加 ESC</text><rect x="690" y="52" width="70" height="46" rx="4" class="box"/><text x="725.0" y="80" class="ttl" text-anchor="middle">ETX</text><text x="725.0" y="120" class="lbl" text-anchor="middle">1 byte</text><path d="M20 40 V32 H390 V40" class="arr" fill="none"/><text x="205.0" y="22" class="lbl" text-anchor="middle">標頭固定 10 bytes</text><path d="M390 40 V32 H690 V40" class="arr" fill="none"/><text x="540.0" y="22" class="lbl" text-anchor="middle">Pick：14 欄位文字；EEW：19 欄位文字</text></svg></div>
+    <figcaption>收送兩端都用同一種 Earthworm Link 訊框。標頭是 STX 加三組三位數字（不足補空白，例如 InstID 1、ModID 8、Type 150 會是 <code>STX␣␣1␣␣8150</code>）；本文裡剛好等於 STX、ETX、ESC 的位元組，前面會多加一個 ESC。</figcaption>
+  </figure>
+
+  <h3>依訊息類型的處理</h3>
+  <div class="tw"><table>
+    <thead><tr><th>Type</th><th>來源設定</th><th>處理</th></tr></thead>
+    <tbody>
+      <tr><td class="nw"><code>pick-type-id</code>（預設 150）</td><td>設定檔</td><td>更新「最後活躍時間」，解析本文為 pick，推入 <code>pickCh</code>。</td></tr>
+      <tr><td class="nw">3</td><td>寫死</td><td>視為上游心跳：只更新最後活躍時間與健康指標，不進入計算。</td></tr>
+      <tr><td class="nw">其他</td><td>—</td><td>忽略，也不會更新最後活躍時間。</td></tr>
+    </tbody>
+  </table></div>
+  <p>接收器不檢查訊框裡的 InstID 與 ModID，只看 Type。</p>
+
+  <h3>Pick 本文：14 個欄位</h3>
+  <p>本文是以空白分隔的一行文字，欄位數必須剛好是 14。</p>
+<pre><code>stn comp net loc lon lat Pa Pv Pd Tc P_epoch weight inst upd_sec
+TEST COMP NT LC 121.5 24.5 1.2 2.3 3.4 0.5 1600000000.0 1 2 3</code></pre>
+  <div class="tw"><table>
+    <thead><tr><th class="num">#</th><th>欄位</th><th>存入</th><th>說明</th></tr></thead>
+    <tbody>
+      <tr><td class="num">1</td><td><code>stn</code></td><td><code>StnName</code></td><td>測站代碼。</td></tr>
+      <tr><td class="num">2</td><td><code>comp</code></td><td><code>StnComp</code></td><td>分量，如 <code>HHZ</code>；第 3 碼不是 <code>Z</code> 的 pick 會被引擎丟棄。</td></tr>
+      <tr><td class="num">3</td><td><code>net</code></td><td><code>StnNet</code></td><td>網路代碼。</td></tr>
+      <tr><td class="num">4</td><td><code>loc</code></td><td><code>StnLoc</code></td><td>位置碼，如 <code>01</code>。<code>02</code> 不參與規模計算。</td></tr>
+      <tr><td class="num">5–6</td><td><code>lon lat</code></td><td><code>Longitude</code>、<code>Latitude</code></td><td>經度、緯度（度）。注意順序是經度在前。</td></tr>
+      <tr><td class="num">7</td><td><code>Pa</code></td><td><code>Pa</code></td><td>P 波後峰值加速度。</td></tr>
+      <tr><td class="num">8</td><td><code>Pv</code></td><td><code>Pv</code></td><td>P 波後峰值速度；用來算品質指標 Q。</td></tr>
+      <tr><td class="num">9</td><td><code>Pd</code></td><td><code>Pd[upd_sec]</code></td><td>P 波後峰值位移；存在以 <code>upd_sec</code> 為索引的位置。</td></tr>
+      <tr><td class="num">10</td><td><code>Tc</code></td><td><code>Tc</code></td><td>特徵週期（秒）。</td></tr>
+      <tr><td class="num">11</td><td><code>P_epoch</code></td><td><code>P</code></td><td>P 波到時，Epoch 秒。</td></tr>
+      <tr><td class="num">12</td><td><code>weight</code></td><td><code>Weight</code></td><td>權重等級，數值愈小愈好。</td></tr>
+      <tr><td class="num">13</td><td><code>inst</code></td><td><code>Inst</code></td><td>儀器類型：1 = HL、2 = HH、3 = HS，決定用哪組規模公式。</td></tr>
+      <tr><td class="num">14</td><td><code>upd_sec</code></td><td><code>UpdSec</code></td><td>這筆資料是 P 波後第幾秒的更新。</td></tr>
+    </tbody>
+  </table></div>
+  <p>同一測站會在 P 波後陸續送來多筆（<code>upd_sec</code> 不同，<code>P_epoch</code> 相同），每筆只帶一個 <code>Pd</code>。引擎之後會把它們合併。Pa、Pv、Pd 的單位由上游決定，程式不做換算。</p>
+
+  <h3>連線健康與逾時</h3>
+  <ul class="txt">
+    <li>每條連線各自記錄最後活躍時間，只有 pick 或 Type 3 會更新它。</li>
+    <li>超過 <code>upstream-timeout</code>（預設 30 秒）沒有任何 pick 或心跳，就關閉這條連線，並把 <code>tcpd_pickreceiver_upstream_healthy</code> 設為 0。</li>
+    <li>上游關閉連線時，這條連線的 goroutine 結束，<code>eew_pick_receiver_connections_active</code> 減 1。</li>
+  </ul>
+
+  <h3>異常時的行為</h3>
+  <div class="tw"><table>
+    <thead><tr><th>狀況</th><th>結果</th></tr></thead>
+    <tbody>
+      <tr><td>欄位數不是 14</td><td>丟棄這筆，<code>eew_pick_receiver_parsed_total{status="failed"}</code> 加 1，event 日誌記 Warn。</td></tr>
+      <tr><td>數值欄位不是數字</td><td>轉換錯誤被忽略，該欄位變成 0，這筆仍算解析成功。</td></tr>
+      <tr><td><code>upd_sec</code> 小於 0 或大於 14</td><td><code>Pd</code> 陣列長度是 15，會 index out of range。<code>handleConn</code> 的 recover 會攔下，但這條連線會被關閉。</td></tr>
+      <tr><td><code>pickCh</code> 已滿（256 筆）</td><td>接收端在推入處等待，TCP 讀取停下，壓力回到上游。</td></tr>
+    </tbody>
+  </table></div>
+</section>
+<!-- ============ 演算邏輯 ============ -->
+<section id="flow">
+  <h2>演算邏輯</h2>
+  <p>引擎在一個迴圈裡等兩件事：<code>pickCh</code> 來了新 pick，或 100 ms 的計時器響了。每收到一筆 pick 就跑一次完整的處理週期；計時器則只負責檢查事件是否該結束。</p>
+
+  <h3>處理一筆 pick</h3>
+  <ol class="flow">
+    <li><span class="dot"></span><div class="node"><b>取出一筆 pick</b><small>從 <code>pickCh</code> 取得，開始計時（寫入 <code>eew_engine_process_duration_seconds</code>）。</small></div></li>
+    <li class="dec"><span class="dot"></span><div class="node"><span class="kind">判斷</span><b>分量第 3 碼是 Z 嗎？</b></div><div class="exit"><b>否</b> → 丟棄</div></li>
+    <li class="dec"><span class="dot"></span><div class="node"><span class="kind">判斷</span><b>權重夠好嗎？</b><small>一般測站要 <code>Weight &lt; ignore-weight-p</code>；YOJ、EOS2、EOS3、EOS4 固定要 <code>Weight &lt; 3</code>。</small></div><div class="exit"><b>否</b> → 丟棄</div></li>
+    <li><span class="dot"></span><div class="node"><b>存入緩衝區</b><small>放進第一個空槽（共 1000 槽），<code>Flag = 1</code>。槽全滿時這筆會被靜默丟棄。</small></div></li>
+    <li><span class="dot"></span><div class="node"><b>清除過期並合併重複</b><small>移除 <code>|現在 − P 到時| &gt; active-parr-win</code> 的 pick。同站、同 P 時間的多筆更新合併成一筆，保留 <code>UpdSec</code> 較大者，並補入較小者的 Pd。</small></div></li>
+    <li><span class="dot"></span><div class="node"><b>算形心，選出觸發站</b><small>形心是所有有效 pick 的平均經緯度與平均 P 時間。與形心距離不超過 <code>trig-dis-win</code>、與平均 P 時間差不超過 <code>trig-tm-win</code> 的測站入選；13 個保留前綴不受這兩個限制。</small></div></li>
+    <li class="dec"><span class="dot"></span><div class="node"><span class="kind">判斷</span><b>觸發站數 ≥ 4？</b></div><div class="exit"><b>否</b> → 等待，<code>countMax</code> 歸零</div></li>
+    <li class="dec"><span class="dot"></span><div class="node"><span class="kind">判斷</span><b><code>countMax</code> &gt; <code>report-limit</code>？</b><small><code>countMax</code> 是觸發站數連續低於歷史最大值的次數。</small></div><div class="exit go"><b>是</b> → 當作新地震，重置事件並結束本次處理</div></li>
+    <li class="dec"><span class="dot"></span><div class="node"><span class="kind">判斷</span><b>觸發站數 &gt; 歷史最大值 <code>maxSta</code>？</b><small>成立時先把 <code>maxSta</code> 更新為目前站數。</small></div><div class="exit"><b>否</b> → 略過。相等：不處理；較少：<code>countMax</code> + 1</div></li>
+    <li class="dec"><span class="dot"></span><div class="node"><span class="kind">判斷</span><b>已發報告數 <code>repFin</code> ≤ 10？</b></div><div class="exit"><b>否</b> → 略過，這個事件已發出 11 份</div></li>
+    <li><span class="dot"></span><div class="node"><b>定位</b><small><code>repFin &lt; 3</code> 用 <code>Locaeq</code>（形心法）；否則用 <code>LocaeqOri</code>（Geiger 疊代加深度網格）。兩者都會依品質反覆剔除離群站再重算。</small></div><div class="exit"><b>剔除後站數不足</b>（快速 &lt; 4、標準 &lt; 5）→ 放棄</div></li>
+    <li class="dec"><span class="dot"></span><div class="node"><span class="kind">判斷</span><b>非共站站數夠嗎？</b><small>快速模式 ≥ 4、標準模式 ≥ 5，而且要比上一份報告的站數多。</small></div><div class="exit"><b>否</b> → 放棄</div></li>
+    <li><span class="dot"></span><div class="node"><b>估算規模</b><small><code>Magnitude()</code> 回傳 XMpd、Mtc、Padj。</small></div></li>
+    <li class="dec"><span class="dot"></span><div class="node"><span class="kind">判斷</span><b><code>mag-min</code> ≤ XMpd ≤ <code>mag-max</code>？</b></div><div class="exit"><b>否</b> → 不發報，event 日誌記 Warn</div></li>
+    <li><span class="dot"></span><div class="node"><b>組成速報</b><small><code>repFin</code> + 1，組出 19 個欄位的字串，算出處理時間 <code>proTime</code>。</small></div></li>
+    <li class="dec"><span class="dot"></span><div class="node"><span class="kind">判斷</span><b>通過早期發報閘門？</b><small>只有第 1–3 份需要：<code>proTime &lt; 10 s</code>；若 <code>pv-thr</code> 與 <code>intensity-thr</code> 都是 1，還要 PGA 場址數 &gt; 0 且 Q &gt; 0。</small></div><div class="exit"><b>否</b> → 不送下游，但仍寫 <code>.rep</code></div></li>
+    <li><span class="dot"></span><div class="node"><b>送往下游，寫 .rep</b><small>字串交給送出端；<code>eew-output-dir</code> 不是空字串時寫一份 <code>.rep</code>。</small></div></li>
+  </ol>
+
+  <div class="note"><span class="k">注意</span>
+    <p>第 9 步先更新了 <code>maxSta</code>，後面任何一步放棄時它都已經改掉。所以同一個站數的計算沒通過，就不會再試，要等到觸發站數再增加才會重算。</p>
+  </div>
+
+  <h3>計時器那一側</h3>
+  <p>每 100 ms 檢查一次：已經發過報告，而且距離第一份報告超過 60 秒，就重置事件。這是事件正常結束的主要方式，詳見<a href="#stop">事件結束條件</a>。</p>
+
+  <h3>緩衝區裡 Flag 的意義</h3>
+  <div class="tw"><table>
+    <thead><tr><th>Flag</th><th>意義</th></tr></thead>
+    <tbody>
+      <tr><td class="nw">0</td><td>空槽，或已被清除、合併、判為共站而丟棄的 pick。</td></tr>
+      <tr><td class="nw">1</td><td>有效 pick，可參與定位與規模。</td></tr>
+      <tr><td class="nw">2</td><td>仍參與定位，但規模計算排除（在 <code>mag-reject</code> 名單、位置碼 02、非 Z 分量、Tc &lt; 0，或 <code>UpdSec</code> &lt; 2）。</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<!-- ============ 觸發條件與門檻 ============ -->
+<section id="trigger">
+  <h2>觸發條件與門檻</h2>
+  <p>要發出一個事件的第一份報告，需要同時滿足下面幾件事。前三項決定「有沒有地震」，後面幾項決定「算出來的結果夠不夠格發出去」。</p>
+  <ol class="txt">
+    <li><b>測站要先成為觸發站。</b>pick 要是 Z 分量、權重過關、還在存活時間內，而且落在形心的距離與時間視窗裡（保留站除外）。</li>
+    <li><b>觸發站至少 4 站。</b>3 站以下只會等待。</li>
+    <li><b>觸發站數要創新高。</b>只有比歷史最大值多才會重新計算。</li>
+    <li><b>共站只算一站。</b>互相距離小於 0.5 km 的測站視為同一站，成對時只保留陣列中排在後面的那一筆，排在前面的標為無效。</li>
+    <li><b>非共站站數要夠，且比上一份報告多。</b></li>
+    <li><b>規模要落在 <code>mag-min</code>～<code>mag-max</code>。</b>判斷的是 XMpd。</li>
+    <li><b>前 3 份要通過早期閘門。</b></li>
+  </ol>
+
+  <h3>保留站與特殊站</h3>
+  <p>下列前綴的測站，在觸發站篩選時<b>不受</b>距離視窗與時間視窗限制，只要是有效 pick 就會入選：</p>
+  <ul class="chips"><li>EOS</li><li>YOJ</li><li>JMJ</li><li>PCY</li><li>LAY</li><li>TWH</li><li>PNG</li><li>PHU</li><li>PTM</li><li>PTT</li><li>VCH</li><li>VWU</li><li>WLC</li></ul>
+  <p>下列測站在 pick 入口用較嚴的權重標準（固定 <code>Weight &lt; 3</code>，不隨 <code>ignore-weight-p</code> 變動）：</p>
+  <ul class="chips"><li>YOJ</li><li>EOS2</li><li>EOS3</li><li>EOS4</li></ul>
+
+  <h3>依報告序號的差異</h3>
+  <p>報告序號等於「該事件已發報告數 + 1」。前三份追求速度，之後追求準確。</p>
+  <div class="tw"><table>
+    <thead><tr><th>報告</th><th>定位</th><th>最少非共站站數</th><th>送出條件</th></tr></thead>
+    <tbody>
+      <tr><td class="nw">#1 – #3</td><td>形心法 <code>Locaeq</code>，深度固定 10 km</td><td class="nw">4</td><td>早期閘門：<code>proTime &lt; 10 s</code>，加上選用的 PGA 條件</td></tr>
+      <tr><td class="nw">#4 – #11</td><td><code>LocaeqOri</code>：Geiger 疊代，深度 10–100 km 網格</td><td class="nw">5</td><td>無閘門</td></tr>
+      <tr><td class="nw">#12 以後</td><td colspan="3">不再處理。事件要等 60 秒逾時才會重置。</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>門檻一覽</h3>
+  <p><span class="tag cfg">設定</span> 表示可在 YAML 調整，<span class="tag hard">寫死</span> 表示寫在程式碼裡。括號內的預設值是 <code>DefaultConfig()</code>，隨附 YAML 的值另外標明。</p>
+  <div class="tw"><table>
+    <thead><tr><th>項目</th><th>門檻</th><th>來源</th></tr></thead>
+    <tbody>
+      <tr class="grp"><td colspan="3">pick 入口</td></tr>
+      <tr><td>分量</td><td>第 3 碼必須是 <code>Z</code></td><td><span class="tag hard">寫死</span></td></tr>
+      <tr><td>權重，一般測站</td><td><code>Weight &lt; ignore-weight-p</code></td><td><span class="tag cfg">設定</span> 預設 3</td></tr>
+      <tr><td>權重，YOJ / EOS2–4</td><td><code>Weight &lt; 3</code></td><td><span class="tag hard">寫死</span></td></tr>
+      <tr class="grp"><td colspan="3">緩衝與觸發站</td></tr>
+      <tr><td>緩衝區容量</td><td>1000 筆</td><td><span class="tag hard">寫死</span></td></tr>
+      <tr><td>pick 存活時間</td><td><code>|現在 − P 到時| ≤ active-parr-win</code></td><td><span class="tag cfg">設定</span> 預設 60 s；隨附 300 s；註解寫正式環境 45 s</td></tr>
+      <tr><td>時間視窗</td><td>與平均 P 時間差 ≤ <code>trig-tm-win</code></td><td><span class="tag cfg">設定</span> 預設 8 s；隨附 40 s</td></tr>
+      <tr><td>距離視窗</td><td>與形心距離 ≤ <code>trig-dis-win</code></td><td><span class="tag cfg">設定</span> 預設 60 km；隨附 180 km</td></tr>
+      <tr><td>最少觸發站數</td><td>≥ 4</td><td><span class="tag hard">寫死</span></td></tr>
+      <tr class="grp"><td colspan="3">事件管理</td></tr>
+      <tr><td>重算條件</td><td>觸發站數 &gt; 歷史最大值</td><td><span class="tag hard">寫死</span></td></tr>
+      <tr><td>新地震判定</td><td><code>countMax &gt; report-limit</code></td><td><span class="tag cfg">設定</span> 預設 1</td></tr>
+      <tr><td>報告數上限</td><td><code>repFin &gt; 10</code> 後不再處理，即最多 11 份</td><td><span class="tag hard">寫死</span></td></tr>
+      <tr><td>事件逾時</td><td>首報後 60 秒</td><td><span class="tag hard">寫死</span></td></tr>
+      <tr><td>事件編號</td><td>1–10000 循環</td><td><span class="tag hard">寫死</span></td></tr>
+      <tr class="grp"><td colspan="3">定位</td></tr>
+      <tr><td>共站距離</td><td>&lt; 0.5 km</td><td><span class="tag hard">寫死</span></td></tr>
+      <tr><td>快速模式剔除</td><td>最大震央距 ≥ <code>max-epi-dis</code> 時剔除最遠站，重算至低於為止</td><td><span class="tag cfg">設定</span> 預設與隨附 100 km</td></tr>
+      <tr><td>標準模式剔除</td><td>0.1 s ≤ Averr ≤ 0.8 s，且 Avwei ≥ 0.3，否則剔除殘差最大的站</td><td><span class="tag hard">寫死</span></td></tr>
+      <tr><td>最少非共站站數</td><td>快速 ≥ 4；標準 ≥ 5；且大於上一份報告</td><td><span class="tag hard">寫死</span></td></tr>
+      <tr class="grp"><td colspan="3">規模</td></tr>
+      <tr><td>納入規模的測站</td><td><code>UpdSec</code> ≥ 2、位置碼非 02、Z 分量、Tc ≥ 0、不在 <code>mag-reject</code></td><td><span class="tag cfg">設定</span> 名單；其餘 <span class="tag hard">寫死</span></td></tr>
+      <tr><td>最少有效 Mpd</td><td>&gt; 3 筆</td><td><span class="tag hard">寫死</span></td></tr>
+      <tr><td>離群過濾</td><td>Z-score &lt; 1.0</td><td><span class="tag hard">寫死</span></td></tr>
+      <tr><td>可發報的規模</td><td><code>mag-min</code> ≤ XMpd ≤ <code>mag-max</code></td><td><span class="tag cfg">設定</span> 預設 0.5 與 10</td></tr>
+      <tr class="grp"><td colspan="3">發報</td></tr>
+      <tr><td>早期閘門</td><td>#1–#3：<code>proTime &lt; 10 s</code></td><td><span class="tag hard">寫死</span></td></tr>
+      <tr><td>PGA 閘門</td><td>#1–#3 另需：PGA ≥ 8 gal 的場址數 &gt; 0，且 Q &gt; 0</td><td><span class="tag cfg">設定</span> <code>pv-thr</code> 與 <code>intensity-thr</code> 都為 1 時啟用</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="note warn"><span class="k">待確認</span>
+    <p><code>term-num</code>（隨附 15）是「報告數超過它就不再更新上一份報告的基準」。但報告數在 11 份就被上限擋下，所以只有把 <code>term-num</code> 設成小於 11，它才會生效。</p>
+  </div>
+</section>
+<!-- ============ 地震定位 ============ -->
+<section id="locate">
+  <h2>地震定位</h2>
+  <p>定位有兩套方法。前三份報告用形心法，追求速度；第四份起用 Geiger 疊代加深度網格，追求準確。兩者共用同一個距離函數與速度模型。</p>
+
+  <h3>距離計算：<code>Delaz</code></h3>
+  <p>用兩點的平均緯度，以三次多項式算出每分角對應的公里數，再把經緯度差換算成平面距離。</p>
+<div class="formula">φ̄ = (φ₁ + φ₂) / 2
+a = 1.840708 + φ̄·(0.0015269 + φ̄·(−0.00034 + φ̄·1.02337×10⁻⁶))
+b = 1.843404 + φ̄·(−6.93799×10⁻⁵ + φ̄·(8.79993×10⁻⁶ + φ̄·(−6.47527×10⁻⁸)))
+距離 = √( (a·Δλ·60)² + (b·Δφ·60)² )    單位 km</div>
+  <p>在北緯 24° 附近，1 度緯度約 110.76 km，1 度經度約 101.74 km。形心距離、共站判定、剔除最遠站、規模的震源距、PGA 預估都用這個函數。</p>
+
+  <h3>速度模型與走時</h3>
+  <p>程式依<b>震源深度</b> z 選一組參數：z 小於分界深度用淺層，否則用深層。選定後速度隨深度線性增加，<code>v(z) = v₀ + vg·z</code>。Z 分量用 P 模型，水平分量用 S 模型；目前只有 Z 分量的 pick 會進來，所以定位實際只用 P 模型，S 模型只用來算 S−P 時間。</p>
+<div class="formula">zc  = −v₀ / vg
+xc  = (Δ² − 2·(v₀/vg)·z₀ − z₀²) / (2Δ)
+ang₁ = π − atan((z₀ − zc) / xc)        （atan 為負時先加 π）
+ang₂ = atan(−zc / (Δ − xc))
+走時 t = −(1/vg) · ln | tan(ang₂/2) / tan(ang₁/2) |</div>
+  <p>Δ 是震央距，z₀ 是震源深度。入射角 ang₁ 也用在 Geiger 疊代的偏導數。</p>
+  <div class="tw"><table>
+    <thead><tr><th>參數</th><th class="num">隨附 YAML</th><th class="num">程式預設</th></tr></thead>
+    <tbody>
+      <tr class="grp"><td colspan="3">P 波</td></tr>
+      <tr><td><code>boundary-p</code> 分界深度（km）</td><td class="num">40.0</td><td class="num">35.0</td></tr>
+      <tr><td><code>sw-p-v</code> / <code>sw-p-vg</code> 淺層</td><td class="num">5.10298 / 0.06659</td><td class="num">4.5 / 0.085</td></tr>
+      <tr><td><code>dp-p-v</code> / <code>dp-p-vg</code> 深層</td><td class="num">7.80479 / 0.00457</td><td class="num">6.0 / 0.023</td></tr>
+      <tr class="grp"><td colspan="3">S 波</td></tr>
+      <tr><td><code>boundary-s</code> 分界深度（km）</td><td class="num">50.0</td><td class="num">35.0</td></tr>
+      <tr><td><code>sw-s-v</code> / <code>sw-s-vg</code> 淺層</td><td class="num">2.9105 / 0.0365</td><td class="num">4.5 / 0.085</td></tr>
+      <tr><td><code>dp-s-v</code> / <code>dp-s-vg</code> 深層</td><td class="num">4.5374 / 0.0023</td><td class="num">6.0 / 0.023</td></tr>
+    </tbody>
+  </table></div>
+  <figure>
+    <div class="fig" style="--minw:560px"><svg viewBox="0 0 700 392" role="img" aria-label="震源深度 10 km 時，P 波與 S 波走時隨震央距增加的曲線，100 km 處 P 約 17.5 秒、S 約 30.9 秒" xmlns="http://www.w3.org/2000/svg"><defs><marker id="ttg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mk-g"/></marker><marker id="ttb" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mk-b"/></marker><marker id="ttt" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mk-t"/></marker></defs><line x1="60.0" y1="16" x2="60.0" y2="324" class="grid"/><text x="60.0" y="342" class="tick" text-anchor="middle">0</text><line x1="214.0" y1="16" x2="214.0" y2="324" class="grid"/><text x="214.0" y="342" class="tick" text-anchor="middle">50</text><line x1="368.0" y1="16" x2="368.0" y2="324" class="grid"/><text x="368.0" y="342" class="tick" text-anchor="middle">100</text><line x1="522.0" y1="16" x2="522.0" y2="324" class="grid"/><text x="522.0" y="342" class="tick" text-anchor="middle">150</text><line x1="676.0" y1="16" x2="676.0" y2="324" class="grid"/><text x="676.0" y="342" class="tick" text-anchor="middle">200</text><line x1="60" y1="324.0" x2="676" y2="324.0" class="grid"/><text x="52" y="328.0" class="tick" text-anchor="end">0</text><line x1="60" y1="272.7" x2="676" y2="272.7" class="grid"/><text x="52" y="276.6666666666667" class="tick" text-anchor="end">10</text><line x1="60" y1="221.3" x2="676" y2="221.3" class="grid"/><text x="52" y="225.33333333333334" class="tick" text-anchor="end">20</text><line x1="60" y1="170.0" x2="676" y2="170.0" class="grid"/><text x="52" y="174.0" class="tick" text-anchor="end">30</text><line x1="60" y1="118.7" x2="676" y2="118.7" class="grid"/><text x="52" y="122.66666666666669" class="tick" text-anchor="end">40</text><line x1="60" y1="67.3" x2="676" y2="67.3" class="grid"/><text x="52" y="71.33333333333331" class="tick" text-anchor="end">50</text><line x1="60" y1="16.0" x2="676" y2="16.0" class="grid"/><text x="52" y="20.0" class="tick" text-anchor="end">60</text><line x1="60" y1="324" x2="676" y2="324" class="axis"/><line x1="60" y1="16" x2="60" y2="324" class="axis"/><path d="M66.2 307.1 L72.3 306.1 L78.5 304.6 L84.6 302.7 L90.8 300.5 L97.0 298.1 L103.1 295.4 L109.3 292.7 L115.4 289.8 L121.6 286.9 L127.8 284.0 L133.9 280.9 L140.1 277.9 L146.2 274.8 L152.4 271.7 L158.6 268.6 L164.7 265.5 L170.9 262.4 L177.0 259.2 L183.2 256.1 L189.4 253.0 L195.5 249.8 L201.7 246.7 L207.8 243.6 L214.0 240.5 L220.2 237.3 L226.3 234.2 L232.5 231.1 L238.6 228.0 L244.8 224.9 L251.0 221.8 L257.1 218.8 L263.3 215.7 L269.4 212.7 L275.6 209.6 L281.8 206.6 L287.9 203.6 L294.1 200.6 L300.2 197.6 L306.4 194.6 L312.6 191.6 L318.7 188.6 L324.9 185.7 L331.0 182.8 L337.2 179.8 L343.4 176.9 L349.5 174.0 L355.7 171.2 L361.8 168.3 L368.0 165.4 L374.2 162.6 L380.3 159.8 L386.5 157.0 L392.6 154.2 L398.8 151.4 L405.0 148.6 L411.1 145.9 L417.3 143.1 L423.4 140.4 L429.6 137.7 L435.8 135.0 L441.9 132.4 L448.1 129.7 L454.2 127.0 L460.4 124.4 L466.6 121.8 L472.7 119.2 L478.9 116.6 L485.0 114.0 L491.2 111.5 L497.4 108.9 L503.5 106.4 L509.7 103.9 L515.8 101.4 L522.0 98.9 L528.2 96.4 L534.3 93.9 L540.5 91.5 L546.6 89.1 L552.8 86.7 L559.0 84.3 L565.1 81.9 L571.3 79.5 L577.4 77.1 L583.6 74.8 L589.8 72.5 L595.9 70.1 L602.1 67.8 L608.2 65.5 L614.4 63.3 L620.6 61.0 L626.7 58.7 L632.9 56.5 L639.0 54.3 L645.2 52.1 L651.4 49.9 L657.5 47.7 L663.7 45.5 L669.8 43.3 L676.0 41.2" class="ln-s" fill="none"/><path d="M66.2 314.4 L72.3 313.8 L78.5 313.0 L84.6 311.9 L90.8 310.6 L97.0 309.2 L103.1 307.8 L109.3 306.2 L115.4 304.6 L121.6 302.9 L127.8 301.2 L133.9 299.5 L140.1 297.8 L146.2 296.0 L152.4 294.3 L158.6 292.5 L164.7 290.7 L170.9 289.0 L177.0 287.2 L183.2 285.4 L189.4 283.6 L195.5 281.8 L201.7 280.1 L207.8 278.3 L214.0 276.5 L220.2 274.7 L226.3 273.0 L232.5 271.2 L238.6 269.5 L244.8 267.7 L251.0 266.0 L257.1 264.2 L263.3 262.5 L269.4 260.8 L275.6 259.0 L281.8 257.3 L287.9 255.6 L294.1 253.9 L300.2 252.2 L306.4 250.5 L312.6 248.9 L318.7 247.2 L324.9 245.5 L331.0 243.9 L337.2 242.2 L343.4 240.6 L349.5 238.9 L355.7 237.3 L361.8 235.7 L368.0 234.1 L374.2 232.5 L380.3 230.9 L386.5 229.3 L392.6 227.8 L398.8 226.2 L405.0 224.6 L411.1 223.1 L417.3 221.6 L423.4 220.0 L429.6 218.5 L435.8 217.0 L441.9 215.5 L448.1 214.0 L454.2 212.5 L460.4 211.0 L466.6 209.6 L472.7 208.1 L478.9 206.6 L485.0 205.2 L491.2 203.8 L497.4 202.3 L503.5 200.9 L509.7 199.5 L515.8 198.1 L522.0 196.7 L528.2 195.3 L534.3 194.0 L540.5 192.6 L546.6 191.2 L552.8 189.9 L559.0 188.5 L565.1 187.2 L571.3 185.9 L577.4 184.6 L583.6 183.3 L589.8 182.0 L595.9 180.7 L602.1 179.4 L608.2 178.1 L614.4 176.8 L620.6 175.6 L626.7 174.3 L632.9 173.1 L639.0 171.8 L645.2 170.6 L651.4 169.4 L657.5 168.1 L663.7 166.9 L669.8 165.7 L676.0 164.5" class="ln-p" fill="none"/><path d="M66.2 316.7 L72.3 316.3 L78.5 315.7 L84.6 314.8 L90.8 313.9 L97.0 312.8 L103.1 311.7 L109.3 310.5 L115.4 309.3 L121.6 308.0 L127.8 306.7 L133.9 305.4 L140.1 304.1 L146.2 302.8 L152.4 301.5 L158.6 300.1 L164.7 298.8 L170.9 297.4 L177.0 296.1 L183.2 294.7 L189.4 293.4 L195.5 292.0 L201.7 290.7 L207.8 289.3 L214.0 287.9 L220.2 286.6 L226.3 285.2 L232.5 283.9 L238.6 282.6 L244.8 281.2 L251.0 279.9 L257.1 278.6 L263.3 277.2 L269.4 275.9 L275.6 274.6 L281.8 273.3 L287.9 272.0 L294.1 270.6 L300.2 269.3 L306.4 268.0 L312.6 266.7 L318.7 265.5 L324.9 264.2 L331.0 262.9 L337.2 261.6 L343.4 260.4 L349.5 259.1 L355.7 257.8 L361.8 256.6 L368.0 255.3 L374.2 254.1 L380.3 252.9 L386.5 251.6 L392.6 250.4 L398.8 249.2 L405.0 248.0 L411.1 246.8 L417.3 245.6 L423.4 244.4 L429.6 243.2 L435.8 242.0 L441.9 240.9 L448.1 239.7 L454.2 238.5 L460.4 237.4 L466.6 236.2 L472.7 235.1 L478.9 233.9 L485.0 232.8 L491.2 231.7 L497.4 230.6 L503.5 229.5 L509.7 228.4 L515.8 227.2 L522.0 226.2 L528.2 225.1 L534.3 224.0 L540.5 222.9 L546.6 221.8 L552.8 220.8 L559.0 219.7 L565.1 218.7 L571.3 217.6 L577.4 216.6 L583.6 215.5 L589.8 214.5 L595.9 213.5 L602.1 212.5 L608.2 211.4 L614.4 210.4 L620.6 209.4 L626.7 208.4 L632.9 207.4 L639.0 206.5 L645.2 205.5 L651.4 204.5 L657.5 203.5 L663.7 202.6 L669.8 201.6 L676.0 200.7" class="ln-sp" fill="none"/><text x="670" y="33.18995474249425" class="lbl-s" text-anchor="end">S 波</text><text x="670" y="156.53400208860808" class="lbl-p" text-anchor="end">P 波</text><text x="670" y="192.65595265388617" class="lbl" text-anchor="end">S−P</text><line x1="368.0" y1="16" x2="368.0" y2="324" class="mark"/><circle cx="368.0" cy="234.1" r="4" class="dot-p"/><circle cx="368.0" cy="165.4" r="4" class="dot-s"/><circle cx="368.0" cy="255.3" r="4" class="dot-sp"/><text x="358.0" y="34" class="lbl" text-anchor="end">震央距 100 km</text><text x="358.0" y="52" class="lbl" text-anchor="end">P 17.5 s ／ S 30.9 s</text><text x="358.0" y="70" class="lbl" text-anchor="end">S−P 13.4 s</text><text x="368.0" y="380" class="lbl" text-anchor="middle">震央距（km）</text><text x="16" y="170.0" class="lbl" text-anchor="middle" transform="rotate(-90 16 170.0)">走時（s）</text></svg></div>
+    <figcaption>用隨附 YAML 的淺層參數，震源深度 10 km 時的走時。S−P 時間隨距離近似線性增加，這也是它能用來估計震央距的原因。</figcaption>
+  </figure>
+
+  <h3>快速定位：<code>Locaeq</code>（報告 #1–#3）</h3>
+  <ol class="txt">
+    <li>只取 Z 分量的測站做平均。</li>
+    <li>震央取這些測站經緯度的平均；發震時間取平均 P 到時再減 2.0 秒；深度固定 10 km。</li>
+    <li>方位角空隙 Gap：把各站相對震央的方位角排序，取相鄰兩站的最大間隔（首尾接成一圈）。</li>
+    <li>算各站到震央的距離，得 MaxDis 與 AvgDis；Q 是 <code>Pv &gt; 0.257</code> 且位置碼為 <code>01</code> 的 Z 測站數。</li>
+    <li>每站的 <code>Perr</code> 設為 0、<code>Wei</code> 設為 1，Averr 與 Avwei 都是 0。</li>
+  </ol>
+  <p>這個方法不用速度模型，也不做殘差檢查。引擎在它外面包了一圈：MaxDis 大於等於 <code>max-epi-dis</code> 時，剔除最遠的測站再重算，剩不到 4 站就放棄。因此前三份報告的 Averr 與 Avwei 都是 0。</p>
+
+  <h3>標準定位：<code>LocaeqOri</code>（報告 #4 起）</h3>
+  <ol class="txt">
+    <li><b>初值。</b>深度 10 km；取 P 到時比平均早 0.5 秒以上的 Z 測站，震央取它們的座標平均，發震時間取它們的 P 平均減 2.0 秒。沒有這種測站時，以第一站附近當起點。</li>
+    <li><b>線性化尺度。</b>在初始震央上用 <code>Delaz</code> 算一次每度緯度、每度經度的公里數，整個疊代過程不再更新。</li>
+    <li><b>Geiger 疊代，共 10 次。</b>每次做下面四件事：
+      <ol class="txt">
+        <li>對每個測站算震央距、理論走時與入射角，以及走時對經度、緯度、深度、發震時間的偏導數；殘差 <code>Perr = P − t0 − 走時</code>；權重用 <code>Wt</code>。</li>
+        <li>先用加權平均殘差修正發震時間。</li>
+        <li>建立加權正規方程，各項除以平均權重，對角線加 10⁻⁵ 的阻尼，反轉 4×4 矩陣，解出四個修正量。</li>
+        <li>更新經度、緯度、深度、發震時間。若發震時間偏離初值超過 60 秒，整組參數退回初值，避免發散。</li>
+      </ol></li>
+    <li><b>深度網格搜尋。</b>固定震央與發震時間，把深度依序設為 10、20、…、100 km（程式用 <code>(k)×10.0001</code>），每個深度計算 <code>Σ Wei·|Perr|</code>，取最小者為最終深度。</li>
+    <li><b>定稿。</b>以最終深度重算各站 <code>Perr</code>、<code>Wei</code>，並用 S 模型與 P 模型相減得到 S−P 時間；<code>Averr</code> 是殘差的均方根，<code>Avwei</code> 是權重的均方根；再算 Q 與 Gap。</li>
+  </ol>
+  <p>疊代階段的深度可以自由變動，但最終深度由網格覆蓋，所以疊代主要決定震央與發震時間，網格才決定深度。引擎外層另外檢查：<code>Averr</code> 要在 0.1–0.8 秒之間，且 <code>Avwei ≥ 0.3</code>，不然就剔除殘差絕對值最大的測站再算，剩不到 5 站就放棄。</p>
+
+  <h3>權重函數 <code>Wt</code></h3>
+  <p>距離愈遠、殘差愈大，權重愈低。權重由兩個因子相乘：</p>
+<div class="formula">h = √(depth² + dist² + 10⁻⁶)                  震源距
+w = 1                          h ≤ 100 km
+w = 500 / (9h − 400)           h &gt; 100 km
+w = w · ( 1 / (1 + |Perr|) )²</div>
+  <div class="tw"><table>
+    <thead><tr><th>震源距 h</th><th class="num">100 km</th><th class="num">150 km</th><th class="num">200 km</th><th class="num">300 km</th><th class="num">600 km</th></tr></thead>
+    <tbody>
+      <tr><td>距離因子</td><td class="num">1.00</td><td class="num">0.53</td><td class="num">0.36</td><td class="num">0.22</td><td class="num">0.10</td></tr>
+    </tbody>
+  </table></div>
+  <div class="tw"><table>
+    <thead><tr><th>殘差 |Perr|</th><th class="num">0.5 s</th><th class="num">1 s</th><th class="num">2 s</th></tr></thead>
+    <tbody>
+      <tr><td>殘差因子</td><td class="num">0.44</td><td class="num">0.25</td><td class="num">0.11</td></tr>
+    </tbody>
+  </table></div>
+  <p>函式簽章裡的疊代次數與 pick 權重等級沒有被使用，所以 pick 的 <code>Weight</code> 只影響入口過濾，不影響定位權重。</p>
+</section>
+
+<!-- ============ 規模計算 ============ -->
+<section id="mag">
+  <h2>規模計算</h2>
+  <p>每個測站各自用位移振幅 Pd 與特徵週期 Tc 算出一個規模，再把全部測站做加權平均。對外發報與範圍檢查用的是 <b>XMpd</b>（Pd 為基礎的規模），Mtc 只放在 <code>.rep</code> 與綜合規模裡。</p>
+
+  <h3>計算步驟</h3>
+  <ol class="txt">
+    <li><b>標記排除的測站。</b>在 <code>mag-reject</code> 名單（站名、分量、網路、位置碼四項完全相符）、位置碼為 <code>02</code>、非 Z 分量、<code>Tc &lt; 0</code>、<code>UpdSec &lt; 2</code> 者，<code>Flag</code> 設為 2，不參與。</li>
+    <li><b>逐站算規模。</b>Pd 取 <code>Pd[min(UpdSec, 2)]</code>；震源距 <code>R = √(depth² + Δ² + 10⁻⁶)</code>；依儀器類型用對應公式算 Mpd；<code>Tc &gt; 0</code> 時另算 Mtc。算出來大於 0 的才收進清單。</li>
+    <li><b>站數檢查。</b>有效 Mpd 不到 4 筆，規模直接視為 0；因為 0 小於 <code>mag-min</code>，引擎會記一筆「out of bounds」警告而不發報。</li>
+    <li><b>離群過濾與加權平均。</b>先求平均與標準差（母體標準差），保留 <code>z &lt; 1.0</code> 者，以測站權重 <code>Wei</code> 加權平均，得 XMpd；Mtc 同樣處理。</li>
+    <li><b>綜合規模 ALLMag。</b>Mtc 與 XMpd 都大於 0.001 時取兩者平均，否則取 XMpd。若 XMpd 小於 0.01，ALLMag 與 XMpd 都歸零。</li>
+    <li><b>振幅調整 Padj。</b>見下方。</li>
+  </ol>
+
+  <h3>公式</h3>
+<div class="formula">Mpd = c₀ + c₁·log₁₀(Pd) + c₂·log₁₀(R)
+Mtc = 4.218·log₁₀(Tc) + 6.166
+Pa理論 = 10 ^ ( (M + c₀ − c₁·log₁₀(R)) / c₂ )
+z   = |x − 平均| / 標準差          平均或標準差為 0 時 z = 0</div>
+  <div class="tw"><table>
+    <thead><tr><th>儀器（<code>Inst</code>）</th><th class="num">Mpd c₀</th><th class="num">c₁</th><th class="num">c₂</th><th class="num">Pa c₀</th><th class="num">c₁</th><th class="num">c₂</th></tr></thead>
+    <tbody>
+      <tr><td>HH（2）</td><td class="num">5.000</td><td class="num">1.102</td><td class="num">1.737</td><td class="num">0.133</td><td class="num">3.083</td><td class="num">1.533</td></tr>
+      <tr><td>HL（1）</td><td class="num">5.067</td><td class="num">1.281</td><td class="num">1.760</td><td class="num">1.006</td><td class="num">3.496</td><td class="num">1.594</td></tr>
+      <tr><td>HS（3）</td><td class="num">4.811</td><td class="num">1.089</td><td class="num">1.738</td><td class="num">0.437</td><td class="num">3.215</td><td class="num">1.525</td></tr>
+    </tbody>
+  </table></div>
+  <p>Pd 與 Pa 的單位必須和這些迴歸係數當初使用的一致；程式本身不做單位換算。1 個標準差的過濾門檻相當嚴格，樣本少時會剔除不少測站。</p>
+
+  <h3>振幅調整 Padj</h3>
+  <p>對每個 <code>Flag = 1</code> 且 <code>Pa &gt; 0</code> 的測站，算「實測 Pa ÷ 以 XMpd 預測的理論 Pa」，同樣做 1σ 過濾後加權平均。Padj 接近 1 表示實測振幅與規模相符。它只寫在速報與 <code>.rep</code> 裡，不影響 XMpd。</p>
+
+  <h3>PGA 預估與早期閘門</h3>
+  <p>前三份報告若啟用 PGA 閘門，引擎會用 XMpd 估計 22 個主要場址的 PGA，只要有任何一個場址預估達 8 gal 以上，就視為通過。</p>
+<div class="formula">R   = √(Δ² + depth²)
+PGA = 12.44 · e^(1.31·M) · R^(−1.837) · Site        Site：深度 &lt; 40 km 用 SiteS，否則 SiteD
+通過 = 預估 PGA ≥ 8.0 gal 的場址數 &gt; 0</div>
+  <details>
+    <summary>22 個場址的座標與場址係數</summary>
+    <div class="tw"><table>
+      <thead><tr><th>代碼</th><th>地區</th><th class="num">經度</th><th class="num">緯度</th><th class="num">SiteS</th><th class="num">SiteD</th></tr></thead>
+      <tbody><tr><td><code>TAP</code></td><td>台北</td><td class="num">121.565</td><td class="num">25.038</td><td class="num">2.218</td><td class="num">2.565</td></tr><tr><td><code>KLU</code></td><td>基隆</td><td class="num">121.745</td><td class="num">25.132</td><td class="num">0.741</td><td class="num">1.567</td></tr><tr><td><code>BAC</code></td><td>八里／板橋</td><td class="num">121.465</td><td class="num">25.013</td><td class="num">2.218</td><td class="num">2.565</td></tr><tr><td><code>NTY</code></td><td>桃園</td><td class="num">121.301</td><td class="num">24.993</td><td class="num">1.210</td><td class="num">2.683</td></tr><tr><td><code>HSN1</code></td><td>新竹 1</td><td class="num">120.969</td><td class="num">24.807</td><td class="num">1.888</td><td class="num">2.120</td></tr><tr><td><code>HSN</code></td><td>新竹</td><td class="num">121.013</td><td class="num">24.827</td><td class="num">1.342</td><td class="num">1.586</td></tr><tr><td><code>NML</code></td><td>苗栗</td><td class="num">120.821</td><td class="num">24.565</td><td class="num">1.782</td><td class="num">2.156</td></tr><tr><td><code>TCU</code></td><td>台中</td><td class="num">120.679</td><td class="num">24.139</td><td class="num">1.624</td><td class="num">2.416</td></tr><tr><td><code>WNT</code></td><td>南投</td><td class="num">120.690</td><td class="num">23.902</td><td class="num">1.479</td><td class="num">2.426</td></tr><tr><td><code>WCH</code></td><td>彰化</td><td class="num">120.545</td><td class="num">24.076</td><td class="num">2.066</td><td class="num">3.674</td></tr><tr><td><code>WDL</code></td><td>斗六</td><td class="num">120.526</td><td class="num">23.699</td><td class="num">2.116</td><td class="num">2.949</td></tr><tr><td><code>CHY</code></td><td>嘉義</td><td class="num">120.454</td><td class="num">23.481</td><td class="num">2.004</td><td class="num">3.030</td></tr><tr><td><code>CHY1</code></td><td>嘉義 1</td><td class="num">120.293</td><td class="num">23.459</td><td class="num">2.201</td><td class="num">3.030</td></tr><tr><td><code>TAI</code></td><td>台南</td><td class="num">120.185</td><td class="num">22.992</td><td class="num">2.447</td><td class="num">1.910</td></tr><tr><td><code>KAU</code></td><td>高雄</td><td class="num">120.312</td><td class="num">22.621</td><td class="num">1.803</td><td class="num">2.359</td></tr><tr><td><code>SPT</code></td><td>屏東</td><td class="num">120.488</td><td class="num">22.683</td><td class="num">1.068</td><td class="num">1.103</td></tr><tr><td><code>ILA</code></td><td>宜蘭</td><td class="num">121.763</td><td class="num">24.731</td><td class="num">1.669</td><td class="num">1.973</td></tr><tr><td><code>HWA</code></td><td>花蓮</td><td class="num">121.620</td><td class="num">23.991</td><td class="num">1.077</td><td class="num">1.061</td></tr><tr><td><code>TTN</code></td><td>台東</td><td class="num">121.151</td><td class="num">22.755</td><td class="num">0.919</td><td class="num">1.043</td></tr><tr><td><code>PNG</code></td><td>澎湖</td><td class="num">119.566</td><td class="num">23.570</td><td class="num">2.607</td><td class="num">1.000</td></tr><tr><td><code>KNM</code></td><td>金門</td><td class="num">118.319</td><td class="num">24.437</td><td class="num">1.000</td><td class="num">1.000</td></tr><tr><td><code>MSU</code></td><td>馬祖</td><td class="num">119.951</td><td class="num">26.157</td><td class="num">1.000</td><td class="num">1.000</td></tr></tbody>
+    </table></div>
+  </details>
+
+  <div class="calc" id="calc">
+    <h4>單站規模試算</h4>
+    <div class="grid">
+      <label>儀器<select id="c-inst"><option value="2">HH（Inst 2）</option><option value="1">HL（Inst 1）</option><option value="3">HS（Inst 3）</option></select></label>
+      <label>Pd<input id="c-pd" type="number" step="any" value="0.005" inputmode="decimal"></label>
+      <label>震央距 Δ（km）<input id="c-dis" type="number" step="any" value="40" inputmode="decimal"></label>
+      <label>震源深度（km）<input id="c-dep" type="number" step="any" value="10" inputmode="decimal"></label>
+      <label>Tc（秒）<input id="c-tc" type="number" step="any" value="0.6" inputmode="decimal"></label>
+    </div>
+    <div class="out">
+      <div>震源距 R（km）<b id="o-r">—</b></div>
+      <div>Mpd<b id="o-mpd">—</b></div>
+      <div>Mtc<b id="o-mtc">—</b></div>
+    </div>
+    <p class="hint" id="o-hint">數值依程式的 <code>mpd1()</code> 與 <code>CalTc()</code> 計算；Pd 與 Tc 為 0 或負數時，程式回傳 0。</p>
+  </div>
+</section>
+
+<!-- ============ 事件結束條件 ============ -->
+<section id="stop">
+  <h2>事件結束條件</h2>
+  <p>程式沒有「事件結束」的通知，只有「重置」：把所有狀態清空，等下一個地震。事件分成兩個狀態，以第一份報告發出為界。</p>
+  <figure>
+    <div class="fig" style="--minw:700px"><svg viewBox="0 0 920 226" role="img" aria-label="事件狀態：收集中與速報中之間的轉換條件" xmlns="http://www.w3.org/2000/svg"><defs><marker id="lfg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mk-g"/></marker><marker id="lfb" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mk-b"/></marker><marker id="lft" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mk-t"/></marker></defs><rect x="20" y="90" width="280" height="100" rx="8" class="box-in"/><text x="160.0" y="127.0" class="ttl" text-anchor="middle">收集中</text><text x="160.0" y="149.0" class="lbl" text-anchor="middle">repFin = 0</text><text x="160.0" y="167.0" class="lbl" text-anchor="middle">pick 累積；站數 &lt; 4 時等待</text><rect x="620" y="90" width="280" height="100" rx="8" class="box-out"/><text x="760.0" y="127.0" class="ttl" text-anchor="middle">速報中</text><text x="760.0" y="149.0" class="lbl" text-anchor="middle">repFin ≥ 1</text><text x="760.0" y="167.0" class="lbl" text-anchor="middle">最多 11 份報告</text><line x1="300" y1="118" x2="620" y2="118" class="arr arr-b" marker-end="url(#lfb)"/><text x="460" y="104" class="lbl" text-anchor="middle">站數 ≥ 4，且定位、規模、站數檢查都通過</text><text x="460" y="138" class="lbl" text-anchor="middle">發出第 1 份報告</text><line x1="620" y1="166" x2="300" y2="166" class="arr" marker-end="url(#lfg)"/><text x="460" y="186" class="lbl" text-anchor="middle">首報後 60 秒，或站數連續減少超過 report-limit</text><text x="460" y="204" class="lbl" text-anchor="middle">清空 pick，事件編號 +1</text><path d="M700 90 C700 34 820 34 820 90" class="arr arr-t" fill="none" marker-end="url(#lft)"/><text x="760" y="24" class="lbl" text-anchor="middle">站數增加 → 重新定位 → 再發報（#2 … #11）</text><path d="M100 90 C100 34 220 34 220 90" class="arr arr-b" fill="none" marker-end="url(#lfb)"/><text x="160" y="24" class="lbl" text-anchor="middle">pick 持續進來</text></svg></div>
+    <figcaption><code>repFin</code> 是已發報告數。收集中時 <code>repFin = 0</code>；發出第一份報告後進入速報中，直到重置才回來。</figcaption>
+  </figure>
+
+  <div class="tw"><table>
+    <thead><tr><th>條件</th><th>檢查時機</th><th>結果</th><th>日誌關鍵字</th></tr></thead>
+    <tbody>
+      <tr><td>首報後超過 60 秒</td><td>計時器，每 100 ms</td><td>重置事件。這是正常結束的主要方式。</td><td><code>Event expired</code></td></tr>
+      <tr><td><code>countMax &gt; report-limit</code></td><td>每次處理週期，觸發站 ≥ 4 時</td><td>重置事件，當作新地震。收集中與速報中都適用。</td><td><code>Listen for a new event</code></td></tr>
+      <tr><td><code>repFin &gt; 10</code></td><td>每次要計算之前</td><td>不再產生新報告，事件並不因此結束，仍等 60 秒逾時。</td><td>無</td></tr>
+      <tr><td>觸發站數 ≤ 3</td><td>每次處理週期</td><td>只是等待，<code>countMax</code> 歸零，不重置。</td><td>Debug：<code>Trigger condition pending</code></td></tr>
+      <tr><td>報告數 &gt; <code>term-num</code></td><td>送出報告時</td><td>不再更新「上一份報告」的比較基準，不影響事件是否結束。</td><td>無</td></tr>
+      <tr><td><code>SIGINT</code> / <code>SIGTERM</code></td><td>隨時</td><td>取消 Context，所有元件收尾，引擎離開迴圈。</td><td><code>(TCPD::Shutdown)</code>、<code>engine stopped</code></td></tr>
+    </tbody>
+  </table></div>
+
+  <h3><code>countMax</code> 如何累積</h3>
+  <p>每次處理週期，觸發站數比歷史最大值少，<code>countMax</code> 加 1；比歷史最大值多，歸零；相等，不動。以 <code>report-limit = 1</code> 為例，連續兩個週期站數偏少時 <code>countMax</code> 變成 2，第三個週期開始時判斷 2 &gt; 1 成立，就重置。這代表原本集中的 pick 已經散開，通常是第一個地震結束、下一個地震開始。</p>
+
+  <h3>重置會清掉什麼</h3>
+  <ul class="txt">
+    <li>緩衝區所有 pick（<code>Flag</code> 全部設為 0）。</li>
+    <li><code>countMax</code>、<code>maxSta</code>、<code>repFin</code> 歸零；上一份報告的比較基準回到初始值。</li>
+    <li>事件編號 <code>numEew</code> 加 1，超過 10000 回到 1。</li>
+  </ul>
+  <p><code>firstRpTime</code> 與事件資料夾名稱不會清除，會在下個事件的第一份報告時覆寫。</p>
+  <div class="note warn"><span class="k">待確認</span>
+    <p>重置時緩衝區是整批清空，不分哪個 pick 屬於哪個地震。若第二個地震的 pick 在重置前已經進來，也會一起被清掉。</p>
+  </div>
+</section>
+<!-- ============ 傳遞到下游 ============ -->
+<section id="down">
+  <h2>傳遞到下游</h2>
+  <p>送出端是 TCP <b>用戶端</b>，連到 <code>eew-send-addr</code>（預設 <code>127.0.0.1:16002</code>，通常是 <code>import_ew</code>）。訊框格式與接收 pick 時相同，見<a href="#pick">Pick 資料界接</a>；InstID、ModID 取自 <code>install-id</code>、<code>module-id</code>（預設 1、8），速報的 Type 取自 <code>eew-type-id</code>（預設 150）。</p>
+
+  <h3>連線管理</h3>
+  <div class="tw"><table>
+    <thead><tr><th>項目</th><th>行為</th></tr></thead>
+    <tbody>
+      <tr><td class="nw">建立連線</td><td>撥號逾時 5 秒。</td></tr>
+      <tr><td class="nw">失敗重試</td><td>指數退避：1、2、4 秒……上限 60 秒；連上後重設為 1 秒。每次失敗 <code>eew_sender_reconnects_total</code> 加 1。</td></tr>
+      <tr><td class="nw">Keep-alive</td><td>啟用，週期 15 秒。</td></tr>
+      <tr><td class="nw">斷線偵測</td><td>背景對連線讀 1 byte。下游正常不會送資料，所以讀到錯誤就代表對方關閉或網路中斷，接著重連。</td></tr>
+      <tr><td class="nw">寫入逾時</td><td>每次寫入前設 5 秒期限。寫入失敗會關閉連線並重連。</td></tr>
+      <tr><td class="nw">保護</td><td><code>Send</code>、<code>SendHeartbeat</code>、<code>connectLoop</code> 都有 panic recover。</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>速報訊息：19 個欄位</h3>
+  <p>本文是以空白分隔的一行文字，格式字串如下。</p>
+<pre><code>%d %f %f %d Mpd %.1f %.2f %.2f %.1f %2d %2d %2d %.1f %.1f %d %d %.1f %c%c%c %.1f</code></pre>
+  <div class="tw"><table>
+    <thead><tr><th class="num">#</th><th>欄位</th><th>格式</th><th>範例值</th></tr></thead>
+    <tbody><tr><td class="num">1</td><td>事件編號 numEew</td><td><code>%d</code></td><td><code>3</code></td></tr><tr><td class="num">2</td><td>報告產生時間</td><td><code>%f</code></td><td><code>1791871331.430000</code></td></tr><tr><td class="num">3</td><td>發震時間 Time0</td><td><code>%f</code></td><td><code>1791871325.100000</code></td></tr><tr><td class="num">4</td><td>第幾份報告 ccount</td><td><code>%d</code></td><td><code>4</code></td></tr><tr><td class="num">5</td><td>固定字串</td><td><code>Mpd</code></td><td><code>Mpd</code></td></tr><tr><td class="num">6</td><td>規模 XMpd</td><td><code>%.1f</code></td><td><code>5.1</code></td></tr><tr><td class="num">7</td><td>震央緯度</td><td><code>%.2f</code></td><td><code>23.91</code></td></tr><tr><td class="num">8</td><td>震央經度</td><td><code>%.2f</code></td><td><code>121.53</code></td></tr><tr><td class="num">9</td><td>深度（km）</td><td><code>%.1f</code></td><td><code>20.0</code></td></tr><tr><td class="num">10</td><td>觸發測站數 gN</td><td><code>%2d</code></td><td><code> 6</code></td></tr><tr><td class="num">11</td><td>非共站測站數 gStaNum</td><td><code>%2d</code></td><td><code> 5</code></td></tr><tr><td class="num">12</td><td>n_mag（固定 0）</td><td><code>%2d</code></td><td><code> 0</code></td></tr><tr><td class="num">13</td><td>走時平均殘差 averr</td><td><code>%.1f</code></td><td><code>0.2</code></td></tr><tr><td class="num">14</td><td>平均權重 avwei</td><td><code>%.1f</code></td><td><code>0.7</code></td></tr><tr><td class="num">15</td><td>品質指標 Q</td><td><code>%d</code></td><td><code>3</code></td></tr><tr><td class="num">16</td><td>方位角空隙 Gap（取整）</td><td><code>%d</code></td><td><code>130</code></td></tr><tr><td class="num">17</td><td>處理時間 proTime（s）</td><td><code>%.1f</code></td><td><code>6.3</code></td></tr><tr><td class="num">18</td><td>mark（3 字元）</td><td><code>%c%c%c</code></td><td><code>fst</code></td></tr><tr><td class="num">19</td><td>振幅調整 Padj</td><td><code>%.1f</code></td><td><code>1.1</code></td></tr></tbody>
+  </table></div>
+  <p>範例（數值為示意，不是真實事件）：</p>
+<pre><code>3 1791871331.430000 1791871325.100000 4 Mpd 5.1 23.91 121.53 20.0  6  5  0 0.2 0.7 3 130 6.3 fst 1.1</code></pre>
+  <ul class="txt">
+    <li>前三份報告走快速模式，所以第 13、14 欄 averr 與 avwei 都是 0.0。</li>
+    <li>第 12 欄 <code>n_mag</code> 目前固定是 0。</li>
+    <li>mark 補足 3 個字元；<code>mark</code> 設成超過 3 個字元時只取前 3 個。</li>
+  </ul>
+
+  <h3>心跳</h3>
+  <p>每 <code>heartbeat-interval</code> 秒（預設 15）送一次，本文是「Unix 時間 0」加換行。尚未連線時靜默略過，寫入失敗的處理與速報相同。</p>
+
+  <h3>什麼情況下速報不會送出</h3>
+  <div class="tw"><table>
+    <thead><tr><th>情況</th><th>結果</th></tr></thead>
+    <tbody>
+      <tr><td>尚未連上下游</td><td><code>Send</code> 回傳 "eewsender: not connected"，event 日誌記 <code>Failed to forward EEW Report</code>。這份報告不會補送。</td></tr>
+      <tr><td>被早期閘門擋下（#1–#3）</td><td>記 <code>suppressed by early-report gate</code>，不送，但報告序號照樣累加，<code>.rep</code> 照樣寫。</td></tr>
+      <tr><td>規模超出 <code>mag-min</code>～<code>mag-max</code></td><td>不產生報告，也沒有 <code>.rep</code>。</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<!-- ============ 地震參數 ============ -->
+<section id="params">
+  <h2>地震參數</h2>
+  <p>報告、<code>.rep</code> 與日誌裡出現的參數，在這裡統一說明。程式欄位名稱來自 <code>trigger/types.go</code>。</p>
+
+  <h3>震源</h3>
+  <div class="tw"><table>
+    <thead><tr><th>參數</th><th>程式欄位</th><th>單位</th><th>說明</th></tr></thead>
+    <tbody>
+      <tr><td>發震時間</td><td><code>Time0</code></td><td>Epoch 秒（UTC）</td><td>快速模式：Z 站平均 P 到時減 2 秒。標準模式：Geiger 疊代解。</td></tr>
+      <tr><td>震央緯度、經度</td><td><code>Xla0</code>、<code>Xlo0</code></td><td>度</td><td>快速模式：測站座標平均。標準模式：疊代解。</td></tr>
+      <tr><td>震源深度</td><td><code>Depth0</code></td><td>km</td><td>快速模式：固定 10。標準模式：10–100 km 網格，間隔 10 km。</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>規模</h3>
+  <div class="tw"><table>
+    <thead><tr><th>參數</th><th>程式欄位</th><th>說明</th></tr></thead>
+    <tbody>
+      <tr><td>XMpd</td><td><code>XMpd</code></td><td>以位移振幅 Pd 為基礎的規模，各站加權平均。速報與規模範圍檢查都用它。</td></tr>
+      <tr><td>Mtc</td><td><code>Mtc</code></td><td>以特徵週期 Tc 為基礎的規模，各站加權平均。</td></tr>
+      <tr><td>ALLMag</td><td><code>ALLMag</code></td><td>Mtc 與 XMpd 的平均；只有一個可用時取 XMpd。寫在 <code>.rep</code> 的 Mall 欄。</td></tr>
+      <tr><td>Padj</td><td><code>Padj</code></td><td>實測 Pa 對理論 Pa 的比值，接近 1 表示相符。</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>定位品質</h3>
+  <div class="tw"><table>
+    <thead><tr><th>參數</th><th>程式欄位</th><th>單位</th><th>說明</th></tr></thead>
+    <tbody>
+      <tr><td>Q</td><td><code>Q</code></td><td>站</td><td><code>Pv &gt; 0.257</code> 且位置碼為 <code>01</code> 的測站數，代表強振動站的多寡。</td></tr>
+      <tr><td>Gap</td><td><code>Gap</code></td><td>度</td><td>方位角空隙：測站相對震央的最大間隔，愈小代表測站愈環繞震央。</td></tr>
+      <tr><td>Averr</td><td><code>Averr</code></td><td>秒</td><td>走時殘差的均方根。快速模式為 0。</td></tr>
+      <tr><td>Avwei</td><td><code>Avwei</code></td><td>—</td><td>定位權重的均方根。快速模式為 0。</td></tr>
+      <tr><td>n（gN）</td><td>—</td><td>站</td><td>進入定位的觸發站數。</td></tr>
+      <tr><td>n_sta（gStaNum）</td><td>—</td><td>站</td><td>扣除共站後的測站數。</td></tr>
+      <tr><td>MaxDis、AvgDis</td><td><code>MaxDis</code>、<code>AvgDis</code></td><td>km</td><td>參與定位的測站離震央的最大與平均距離。快速模式用 MaxDis 決定要不要剔除最遠站。</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>時效與事件</h3>
+  <div class="tw"><table>
+    <thead><tr><th>參數</th><th>說明</th></tr></thead>
+    <tbody>
+      <tr><td>proTime</td><td>處理時間：報告產生時間減發震時間（秒），也就是從地震發生到這份報告成形過了多久。<code>eew_engine_pro_time_seconds</code> 依報告序號統計它。</td></tr>
+      <tr><td>numEew</td><td>事件編號，從 1 開始，每次重置加 1，超過 10000 回到 1。</td></tr>
+      <tr><td>ccount / repFin</td><td>該事件第幾份報告 / 已發報告數。</td></tr>
+      <tr><td>mark</td><td>3 字元識別標記，預設 <code>fst</code>，會出現在速報與 <code>.rep</code> 檔名。</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>測站 pick</h3>
+  <div class="tw"><table>
+    <thead><tr><th>參數</th><th>說明</th></tr></thead>
+    <tbody>
+      <tr><td>Pa、Pv、Pd</td><td>P 波後的峰值加速度、速度、位移。單位由上游決定，程式不換算。</td></tr>
+      <tr><td>Tc</td><td>特徵週期（秒），用來算 Mtc。</td></tr>
+      <tr><td>P</td><td>P 波到時，Epoch 秒。</td></tr>
+      <tr><td>Weight</td><td>pick 的權重等級，數值愈小愈好；只用於入口過濾與 <code>.rep</code> 的 Pk_wei。</td></tr>
+      <tr><td>Inst</td><td>儀器類型：1 = HL、2 = HH、3 = HS。</td></tr>
+      <tr><td>UpdSec</td><td>資料是 P 波後第幾秒的更新。規模只採用 <code>UpdSec ≥ 2</code> 的測站。</td></tr>
+      <tr><td>UsdSec</td><td>實際採用的 Pd 索引，等於 <code>min(UpdSec, 2)</code>；沒被採用的測站是 0。</td></tr>
+      <tr><td>Perr</td><td>走時殘差（秒）：<code>P 到時 − 發震時間 − 理論走時</code>。快速模式為 0。</td></tr>
+      <tr><td>Wei</td><td>該站在定位與規模加權平均中的權重。快速模式為 1。</td></tr>
+      <tr><td>Dis</td><td>測站到震央的距離（km）。<code>.rep</code> 的 Dis 欄實際是震源距，已把深度算進去。</td></tr>
+      <tr><td>PSTime</td><td>理論 S−P 時間（秒）。只有標準模式會算，快速模式為 0。</td></tr>
+      <tr><td>Flag</td><td>0 無效、1 有效、2 參與定位但不計規模。</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<!-- ============ .rep ============ -->
+<section id="rep">
+  <h2>.rep 報告檔</h2>
+  <p>只要 <code>eew-output-dir</code> 不是空字串，每產生一份報告就寫一個 <code>.rep</code>，不論這份報告有沒有送給下游。</p>
+
+  <h3>位置與檔名</h3>
+<pre><code>&lt;eew-output-dir&gt;/event/&lt;YYYY&gt;/&lt;MM&gt;/&lt;首報時間&gt;_evt&lt;事件編號&gt;/&lt;發震時間&gt;_n&lt;報告序號&gt;_&lt;mark&gt;.rep
+
+例：/data/output/event/2026/10/20261013_060208_evt3/20261013_060205_n4_fst.rep</code></pre>
+  <ul class="txt">
+    <li>資料夾的 <code>YYYY/MM</code> 與「首報時間」都是 <b>UTC</b>，首報時間是這個事件第一份報告產生的時間。同一事件的所有報告放在同一個資料夾。</li>
+    <li>檔名裡的時間是這份報告的<b>發震時間</b>（UTC）；每份報告重新定位，所以檔名裡的時間會略有不同。</li>
+    <li>資料夾建立或檔案寫入失敗只記 Error，不影響送出速報。</li>
+  </ul>
+
+  <h3>範例</h3>
+  <p>下面是第 4 份報告的範例，數值為示意，不是真實事件；格式與程式的輸出格式字串一致。</p>
+<pre><code>
+Reporting time   2026/10/13 06:02:11.43  averr=0.2 Q=3 Gap=130 Avg_wei=0.7 n=6 n_sta=5 Padj=1.1 no_eq=3
+year  month  day  hour min  sec      lat      lon        dep    Mall   Mpd_s  Mpv   Mpd    Mtc   process_time  first_ptime
+2026 10      13   6     2    5.10   23.9120   121.5310  20.00    5.2    0.0    0.0    5.1 5.33 6.33
+
+Sta     C  N  L       lat        lon        pa        pv        pd        tc   Mtc   MPv   MPd    Perr   Dis  H_Wei        Parr     Pk_wei  Upd_sec  P_S  usd_sec
+ ST01 HHZ XX 01  23.97500  121.60500  5.359942  0.310000  0.009508  0.623289  5.30  0.00  5.12  0.1800    22 0.72 2026/10/13 06:02:09.19 0 03 2.98 02
+ ST02 HHZ XX 01  23.84200  121.47100  7.041030  0.280000  0.012900  0.676474  5.45  0.00  5.26 -0.2200    22 0.67 2026/10/13 06:02:08.76 0 03 2.95 02
+ ST03 HHZ XX 01  24.03100  121.51200  5.618576  0.240000  0.009704  0.651112  5.38  0.00  5.18  0.3500    24 0.55 2026/10/13 06:02:09.63 1 02 3.18 02
+ ST04 HLZ XX 01  23.76100  121.64600  4.840587  0.350000  0.009687  0.596655  5.22  0.00  5.05 -0.1500    29 0.76 2026/10/13 06:02:09.91 0 03 3.78 02
+ ST05 HHZ XX 02  23.94200  121.73800  5.002724  0.290000  0.000000  0.695193  5.50  0.00  0.00  0.2800    29 0.61 2026/10/13 06:02:10.45 1 03 3.86 00</code></pre>
+
+  <h3>抬頭行</h3>
+  <div class="tw"><table>
+    <thead><tr><th>欄位</th><th>說明</th></tr></thead>
+    <tbody>
+      <tr><td><code>Reporting time</code></td><td>報告產生時間，UTC，到百分之一秒。</td></tr>
+      <tr><td><code>averr</code>、<code>Avg_wei</code>、<code>Q</code>、<code>Gap</code></td><td>走時殘差均方根、權重均方根、品質指標、方位角空隙。</td></tr>
+      <tr><td><code>n</code>、<code>n_sta</code></td><td>觸發站數、扣除共站後的站數。</td></tr>
+      <tr><td><code>Padj</code></td><td>振幅調整係數。</td></tr>
+      <tr><td><code>no_eq</code></td><td>事件編號（<code>numEew</code>）。</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>發震行</h3>
+  <p>表頭有 16 個欄名，資料行只有 15 個數值，最後一個欄名沒有對應的值。</p>
+  <div class="tw"><table>
+    <thead><tr><th>欄位</th><th>說明</th></tr></thead>
+    <tbody>
+      <tr><td><code>year month day hour min sec</code></td><td>發震時間，UTC；秒數含小數。</td></tr>
+      <tr><td><code>lat lon dep</code></td><td>震央緯度、經度、深度（km）。</td></tr>
+      <tr><td><code>Mall</code></td><td>ALLMag。</td></tr>
+      <tr><td><code>Mpd_s</code>、<code>Mpv</code></td><td>目前固定輸出 0.0。</td></tr>
+      <tr><td><code>Mpd</code></td><td>XMpd，與速報裡的規模相同。</td></tr>
+      <tr><td><code>Mtc</code></td><td>以 Tc 為基礎的規模。</td></tr>
+      <tr><td><code>process_time</code></td><td>proTime（秒）。</td></tr>
+      <tr><td><code>first_ptime</code></td><td>表頭有這個欄名，但資料行沒有對應的數值。</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>測站行</h3>
+  <div class="tw"><table>
+    <thead><tr><th>欄位</th><th>說明</th></tr></thead>
+    <tbody>
+      <tr><td><code>Sta C N L</code></td><td>站名、分量、網路、位置碼。</td></tr>
+      <tr><td><code>lat lon</code></td><td>測站緯度、經度。注意這裡緯度在前，pick 輸入則是經度在前。</td></tr>
+      <tr><td><code>pa pv pd tc</code></td><td>Pa、Pv、Pd、Tc。<code>pd</code> 是規模步驟採用的 Pd；被規模排除的測站沒有被複製，顯示 0。</td></tr>
+      <tr><td><code>Mtc</code></td><td>由 Tc 換算的單站規模。</td></tr>
+      <tr><td><code>MPv</code></td><td>固定 0。</td></tr>
+      <tr><td><code>MPd</code></td><td>單站 Mpd；被規模排除的測站是 0。</td></tr>
+      <tr><td><code>Perr</code></td><td>走時殘差（秒）。</td></tr>
+      <tr><td><code>Dis</code></td><td>震源距（km），取整數。</td></tr>
+      <tr><td><code>H_Wei</code></td><td>該站權重 <code>Wei</code>。</td></tr>
+      <tr><td><code>Parr</code></td><td>P 波到時，UTC，到百分之一秒。</td></tr>
+      <tr><td><code>Pk_wei</code></td><td>pick 原本的權重等級 <code>Weight</code>。</td></tr>
+      <tr><td><code>Upd_sec</code>、<code>usd_sec</code></td><td>pick 的更新秒數、實際採用的 Pd 索引。</td></tr>
+      <tr><td><code>P_S</code></td><td>理論 S−P 時間（秒）。</td></tr>
+    </tbody>
+  </table></div>
+  <div class="note"><span class="k">哪些測站會列出</span>
+    <p><code>Flag</code> 大於 0 的測站都會列出，包含只計定位、不計規模的測站（範例中的 ST05）。被判為共站而丟棄的測站不列。前三份報告走快速模式，所以 <code>Perr</code> 為 0、<code>H_Wei</code> 為 1.00、<code>P_S</code> 為 0.00。</p>
+  </div>
+</section>
+
+<!-- ============ 日誌 ============ -->
+<section id="log">
+  <h2>日誌檔</h2>
+  <p>日誌分成三份，各有各的內容與切檔。三份共用 <code>log-level</code>，路徑在 <code>log-path</code>（預設 <code>logs</code>）底下，依模組分子資料夾。</p>
+  <div class="tw"><table>
+    <thead><tr><th>檔案</th><th>內容</th><th>寫入者</th></tr></thead>
+    <tbody>
+      <tr><td class="nw"><code>service/tcpd_service.log</code></td><td>服務生命週期：載入設定、參數回顯、啟動與關機、metrics 伺服器。</td><td><code>main</code>、<code>metrics</code></td></tr>
+      <tr><td class="nw"><code>network/tcpd_network.log</code></td><td>連線層：上游連入與斷開、逾時、對下游的連線、重連、心跳。</td><td><code>eewsender</code>、<code>pickreceiver</code></td></tr>
+      <tr><td class="nw"><code>event/tcpd_event.log</code></td><td>事件計算：pick 解包、過濾、觸發、定位、規模、發報、<code>.rep</code> 輸出、事件重置。</td><td><code>eewengine</code>、<code>pickreceiver</code></td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>行格式</h3>
+<pre><code><span class="c-dim">時間（本機時區，毫秒）</span>  <span class="c-dim">[等級]</span>  <span class="c-tag">(模組::動作)</span> 訊息內容
+2026-10-13 14:02:11.486 [info] (Engine::Publish) EEW Report #4 successfully forwarded to DCSN upstream</code></pre>
+  <ul class="txt">
+    <li>時間格式是 <code>2006-01-02 15:04:05.000</code>。容器映像把時區設成 <code>Asia/Taipei</code>，所以日誌是台灣時間，而 <code>.rep</code> 與速報裡的時間是 UTC，兩者要換算。</li>
+    <li>等級字串是 logrus 的名稱：<code>debug</code>、<code>info</code>、<code>warning</code>、<code>error</code>、<code>fatal</code>。注意警告是 <code>warning</code>，不是 <code>warn</code>；<code>log-level</code> 設定可以寫 <code>warn</code>。</li>
+    <li>程式沒有使用 logrus 的結構化欄位，行尾不會有 <code>key=value</code>，數值都在訊息文字裡。</li>
+  </ul>
+
+  <h3>切檔與保留</h3>
+  <ul class="txt">
+    <li>單檔 10 MB 就切檔，最多保留 30 份，超過 90 天的刪除，用本機時間命名。</li>
+    <li>每天本機時間 00:00 另外強制切一次，所以每天的日誌分開存放。舊檔會被改名成像 <code>tcpd_service-2026-07-15T00-00-00.000.log</code> 的帶時間戳檔名。</li>
+    <li><code>log-console</code> 為 true 時同時輸出到標準輸出。三份日誌都會輸出，主控台上會混在一起。</li>
+  </ul>
+
+  <h3>範例</h3>
+  <p>以下由程式的訊息範本組成，數值為示意，並非真實紀錄。</p>
+  <h4>service</h4>
+<pre><code><span class="c-dim">2026-10-13 14:00:00.001</span> <span class="c-info">[info]</span> <span class="c-tag">(TCPD::Initial)</span> Loading configuration file path=tcpd_fast.yaml
+<span class="c-dim">2026-10-13 14:00:00.001</span> <span class="c-info">[info]</span> <span class="c-tag">(TCPD::Initial)</span> Loaded P-wave velocity model: Boundary=40.0 SwPV=5.1030 SwPVG=0.06659 DpPV=7.8048 DpPVG=0.00457
+<span class="c-dim">2026-10-13 14:00:00.001</span> <span class="c-info">[info]</span> <span class="c-tag">(TCPD::Initial)</span> Engine trigger parameters: TrigTmWin=40.0s TrigDisWin=180.0km ActiveParrWin=300.0s ReportLimit=1 TermNum=15
+<span class="c-dim">2026-10-13 14:00:00.002</span> <span class="c-info">[info]</span> <span class="c-tag">(TCPD::Initial)</span> Network topology: PickListenAddrs=[:16001] EEWSendAddr=127.0.0.1:16002 HeartbeatInt=15s
+<span class="c-dim">2026-10-13 14:00:00.003</span> <span class="c-info">[info]</span> Starting Prometheus HTTP server on :8080</code></pre>
+  <h4>network</h4>
+<pre><code><span class="c-dim">2026-10-13 14:00:00.010</span> <span class="c-info">[info]</span> <span class="c-tag">(PickReceiver::Listen)</span> Pick receiver listening on :16001
+<span class="c-dim">2026-10-13 14:00:00.014</span> <span class="c-info">[info]</span> <span class="c-tag">(EEWSender::Connect)</span> Successfully connected to DCSN upstream at 127.0.0.1:16002
+<span class="c-dim">2026-10-13 14:00:02.350</span> <span class="c-info">[info]</span> <span class="c-tag">(PickReceiver::Open)</span> Upstream client connected from 10.0.0.21:50122
+<span class="c-dim">2026-10-13 14:31:40.917</span> <span class="c-warn">[warning]</span> <span class="c-tag">(PickReceiver::Timeout)</span> Upstream connection timeout after 30s with no data/heartbeat, closing socket: 10.0.0.21:50122
+<span class="c-dim">2026-10-13 14:31:41.002</span> <span class="c-warn">[warning]</span> <span class="c-tag">(EEWSender::Reconnect)</span> Downstream 127.0.0.1:16002 disconnected: EOF, connection closed, will attempt to reconnect
+<span class="c-dim">2026-10-13 14:31:41.004</span> <span class="c-warn">[warning]</span> <span class="c-tag">(EEWSender::Reconnect)</span> Cannot connect to DCSN 127.0.0.1:16002: dial tcp 127.0.0.1:16002: connect: connection refused (retry in 1s, attempt #1)</code></pre>
+  <h4>event：一次發報</h4>
+<pre><code><span class="c-dim">2026-10-13 14:02:11.412</span> <span class="c-info">[info]</span> <span class="c-tag">(Engine::Trigger)</span> Earthquake event trigger detected! vsnTrigger=6, initiating location and magnitude calculation
+<span class="c-dim">2026-10-13 14:02:11.414</span> <span class="c-info">[info]</span> <span class="c-tag">(Engine::Locaeq)</span> Running Standard LocaeqOri (repFin=3 &gt;= 3): Iterative residual convergence start
+<span class="c-dim">2026-10-13 14:02:11.421</span> <span class="c-info">[info]</span> <span class="c-tag">(Engine::Magnitude)</span> Magnitude calculation completed: XMpd=5.15 Padj=1.11 ValidStations=5
+<span class="c-dim">2026-10-13 14:02:11.430</span> <span class="c-info">[info]</span> <span class="c-tag">(Engine::Publish)</span> EEW#4 Generated: EventID=3 M=5.1 Lat=23.9120 Lon=121.5310 Dep=20.0km ProTime=6.3s StaNum=5
+<span class="c-dim">2026-10-13 14:02:11.432</span> <span class="c-info">[info]</span> <span class="c-tag">(Engine::Publish)</span> EEW Report #4 successfully forwarded to DCSN upstream
+<span class="c-dim">2026-10-13 14:02:11.437</span> <span class="c-info">[info]</span> <span class="c-tag">(Engine::ReportFile)</span> Saved detailed event report to /data/output/event/2026/10/20261013_060208_evt3/20261013_060205_n4_fst.rep
+<span class="c-dim">2026-10-13 14:03:08.221</span> <span class="c-info">[info]</span> <span class="c-tag">(Engine::EventReset)</span> Event expired (nowTime - firstRpTime &gt; 60s), resetting engine state for new event</code></pre>
+
+  <h3>訊息標籤一覽</h3>
+  <div class="tw"><table>
+    <thead><tr><th>標籤</th><th>檔案</th><th>等級</th><th>內容</th></tr></thead>
+    <tbody>
+      <tr class="grp"><td colspan="4">service</td></tr>
+      <tr><td><code>(TCPD::Initial)</code></td><td>service</td><td>info / fatal</td><td>載入設定檔、速度模型、觸發參數、網路位址；沒有 pick 監聽位址或接收器啟動失敗時 fatal 並結束。</td></tr>
+      <tr><td><code>(TCPD::Shutdown)</code></td><td>service</td><td>info</td><td>收到結束訊號。</td></tr>
+      <tr class="grp"><td colspan="4">network</td></tr>
+      <tr><td><code>(PickReceiver::Listen)</code></td><td>network</td><td>info</td><td>開始監聽。</td></tr>
+      <tr><td><code>(PickReceiver::Open)</code></td><td>network</td><td>info / error</td><td>上游連入；accept 錯誤；處理連線時 panic 被攔下。</td></tr>
+      <tr><td><code>(PickReceiver::Close)</code></td><td>network</td><td>info</td><td>對方關閉連線。</td></tr>
+      <tr><td><code>(PickReceiver::Timeout)</code></td><td>network</td><td>warning</td><td>上游逾時，伺服器端關閉連線。</td></tr>
+      <tr><td><code>(PickReceiver::Heartbeat)</code></td><td>network</td><td>debug</td><td>收到上游心跳。</td></tr>
+      <tr><td><code>(EEWSender::Connect)</code></td><td>network</td><td>info</td><td>連上下游。</td></tr>
+      <tr><td><code>(EEWSender::Reconnect)</code></td><td>network</td><td>warning</td><td>連線失敗或下游斷線，含第幾次重試與下次等待時間。</td></tr>
+      <tr><td><code>(EEWSender::Send)</code></td><td>network</td><td>error</td><td>寫入失敗，或 panic 被攔下。</td></tr>
+      <tr><td><code>(EEWSender::Heartbeat)</code></td><td>network</td><td>debug / warning</td><td>心跳已送出；寫入失敗。</td></tr>
+      <tr class="grp"><td colspan="4">event</td></tr>
+      <tr><td><code>(PickReceiver::Parse)</code></td><td>event</td><td>warning / debug</td><td>解析失敗；每筆 pick 的內容。</td></tr>
+      <tr><td><code>(Engine::Cycle)</code></td><td>event</td><td>info / debug</td><td>引擎啟停；清除過期 pick。</td></tr>
+      <tr><td><code>(Engine::PickFilter)</code></td><td>event</td><td>debug</td><td>pick 被入口過濾丟棄及原因。</td></tr>
+      <tr><td><code>(Engine::Centroid)</code></td><td>event</td><td>debug</td><td>形心與有效 pick 數。</td></tr>
+      <tr><td><code>(Engine::Trigger)</code></td><td>event</td><td>info / debug</td><td>偵測到觸發；或測站被視窗剔除、站數不足的等待。</td></tr>
+      <tr><td><code>(Engine::Locaeq)</code></td><td>event</td><td>info / debug</td><td>使用哪種定位；剔除了哪些測站。</td></tr>
+      <tr><td><code>(Engine::CoSite)</code></td><td>event</td><td>debug</td><td>共站檢查結果。</td></tr>
+      <tr><td><code>(Engine::Magnitude)</code></td><td>event</td><td>info / warning</td><td>規模完成；規模超出範圍而不發報。</td></tr>
+      <tr><td><code>(Engine::Publish)</code></td><td>event</td><td>info / warning / debug</td><td>報告產生、已送出、被閘門抑制、送出失敗；debug 時印出原始字串。</td></tr>
+      <tr><td><code>(Engine::ReportFile)</code></td><td>event</td><td>info / error</td><td><code>.rep</code> 已儲存，或無法建立資料夾與檔案。</td></tr>
+      <tr><td><code>(Engine::EventReset)</code></td><td>event</td><td>info</td><td>事件重置及原因。</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>排查速查</h3>
+  <div class="tw"><table>
+    <thead><tr><th>症狀</th><th>先看</th><th>搜尋</th></tr></thead>
+    <tbody>
+      <tr><td>收不到 pick</td><td>network；指標 <code>eew_pick_receiver_connections_active</code></td><td><code>Upstream client connected</code>、<code>Timeout</code></td></tr>
+      <tr><td>pick 有進來但不觸發</td><td>event，需開 debug</td><td><code>PickFilter</code>、<code>Trigger condition pending</code>、<code>Filtered out distant station</code></td></tr>
+      <tr><td>觸發了卻沒有速報</td><td>event</td><td><code>out of bounds</code>、<code>suppressed by early-report gate</code></td></tr>
+      <tr><td>速報沒到下游</td><td>event 與 network；指標 <code>eew_sender_connected</code></td><td><code>Failed to forward</code>、<code>EEWSender::Reconnect</code></td></tr>
+      <tr><td>找某次事件的 .rep</td><td>event</td><td><code>Saved detailed event report to</code></td></tr>
+      <tr><td>事件為什麼結束</td><td>event</td><td><code>EventReset</code></td></tr>
+    </tbody>
+  </table></div>
+  <p>Promtail 以正規表示式拆出時間、等級與訊息，等級存成 Loki 標籤，並依 <code>Asia/Taipei</code> 解讀時間戳。目前它只收 <code>service</code> 資料夾。</p>
+</section>
+
+<!-- ============ 設定檔 ============ -->
+<section id="config">
+  <h2>設定檔</h2>
+  <p>設定檔是 YAML，預設讀取執行目錄下的 <code>tcpd_fast.yaml</code>。沒寫的欄位使用「程式預設」。<span class="tag dbg">未使用</span> 表示欄位會被解析，但程式邏輯沒有引用。</p>
+  <div class="tw"><table>
+    <thead><tr><th>參數</th><th>程式預設</th><th>隨附 YAML</th><th>說明</th></tr></thead>
+    <tbody><tr class="grp"><td colspan="4">網路與識別</td></tr><tr><td class="nw"><code>metrics-addr</code></td><td>:8080</td><td>（未設）</td><td>Prometheus <code>/metrics</code> 監聽位址。</td></tr><tr><td class="nw"><code>pick-listen-addr</code></td><td>:16001</td><td>:16001</td><td>pick 監聽位址（單一）。</td></tr><tr><td class="nw"><code>pick-listen-addrs</code></td><td>（空）</td><td>（未設）</td><td>多個監聽位址的清單，與上一項合併去重。</td></tr><tr><td class="nw"><code>eew-send-addr</code></td><td>127.0.0.1:16002</td><td>127.0.0.1:16002</td><td>速報送出的下游位址。</td></tr><tr><td class="nw"><code>install-id / module-id</code></td><td>1 / 8</td><td>1 / 8</td><td>訊框的 InstID、ModID。</td></tr><tr><td class="nw"><code>pick-type-id / eew-type-id</code></td><td>150 / 150</td><td>150 / 150</td><td>pick 與速報的訊息類型。</td></tr><tr><td class="nw"><code>upstream-timeout</code></td><td>30</td><td>（未設）</td><td>上游無資料的逾時秒數。</td></tr><tr><td class="nw"><code>heartbeat-interval</code></td><td>15</td><td>15</td><td>對下游送心跳的間隔（秒）。</td></tr><tr class="grp"><td colspan="4">觸發與報告</td></tr><tr><td class="nw"><code>trig-tm-win</code></td><td>8.0</td><td>40.0</td><td>觸發時間視窗（秒）。</td></tr><tr><td class="nw"><code>trig-dis-win</code></td><td>60.0</td><td>180.0</td><td>觸發距離視窗（km）。</td></tr><tr><td class="nw"><code>active-parr-win</code></td><td>60.0</td><td>300</td><td>pick 存活時間（秒）；隨附註解寫正式環境為 45.0。</td></tr><tr><td class="nw"><code>report-limit</code></td><td>1</td><td>1</td><td>新地震判定的 <code>countMax</code> 門檻。</td></tr><tr><td class="nw"><code>term-num</code></td><td>15</td><td>15</td><td>報告數超過後不再更新上一份報告的基準。</td></tr><tr><td class="nw"><code>max-epi-dis</code></td><td>100</td><td>100</td><td>快速模式剔除最遠站的震央距門檻（km）。</td></tr><tr><td class="nw"><code>intensity-thr / pv-thr</code></td><td>1 / 0</td><td>1 / 1</td><td>兩者皆為 1 時，前 3 份報告啟用 PGA 閘門。</td></tr><tr><td class="nw"><code>ignore-weight-p</code></td><td>3</td><td>3</td><td>一般測站的 P pick 權重門檻。</td></tr><tr><td class="nw"><code>ignore-weight-s</code></td><td>3</td><td>3</td><td>S pick 權重門檻。 <span class="tag dbg">未使用</span></td></tr><tr><td class="nw"><code>mag-min / mag-max</code></td><td>0.5 / 10.0</td><td>0.5 / 10</td><td>可發報的規模範圍。</td></tr><tr><td class="nw"><code>mark</code></td><td>fst</td><td>fst</td><td>報告識別標記，輸出時補足 3 字元。</td></tr><tr><td class="nw"><code>mag-reject</code></td><td>（空）</td><td>20 筆</td><td>不參與規模的 SCNL 清單，每筆 <code>{ sta, chn, net, loc }</code>。</td></tr><tr><td class="nw"><code>eew-output-dir</code></td><td>（空，不輸出）</td><td>/mnt/d/VM/iisi/EEW/go-tcpd-fast/output</td><td><code>.rep</code> 輸出根目錄。</td></tr><tr><td class="nw"><code>show-report</code></td><td>1</td><td>1</td><td>是否顯示報告內容。 <span class="tag dbg">未使用</span></td></tr><tr class="grp"><td colspan="4">速度模型</td></tr><tr><td class="nw"><code>boundary-p</code></td><td>35.0</td><td>40.0</td><td>P 波淺層與深層的分界深度（km）。</td></tr><tr><td class="nw"><code>sw-p-v / sw-p-vg</code></td><td>4.5 / 0.085</td><td>5.10298 / 0.06659</td><td>淺層 P 波速度（km/s）與梯度。</td></tr><tr><td class="nw"><code>dp-p-v / dp-p-vg</code></td><td>6.0 / 0.023</td><td>7.80479 / 0.00457</td><td>深層 P 波速度與梯度。</td></tr><tr><td class="nw"><code>boundary-s</code></td><td>35.0</td><td>50.0</td><td>S 波分界深度（km）。</td></tr><tr><td class="nw"><code>sw-s-v / sw-s-vg</code></td><td>4.5 / 0.085</td><td>2.9105 / 0.0365</td><td>淺層 S 波速度與梯度。</td></tr><tr><td class="nw"><code>dp-s-v / dp-s-vg</code></td><td>6.0 / 0.023</td><td>4.5374 / 0.0023</td><td>深層 S 波速度與梯度。</td></tr><tr class="grp"><td colspan="4">日誌</td></tr><tr><td class="nw"><code>log-path</code></td><td>logs</td><td>logs</td><td>日誌根目錄。</td></tr><tr><td class="nw"><code>log-level</code></td><td>info</td><td>info</td><td><code>debug</code> / <code>info</code> / <code>warn</code> / <code>error</code>。</td></tr><tr><td class="nw"><code>log-console</code></td><td>true</td><td>true</td><td>是否同時輸出到標準輸出。</td></tr><tr class="grp"><td colspan="4">舊版 Earthworm 欄位</td></tr><tr><td class="nw"><code>log-file</code></td><td>0</td><td>0</td><td>舊版日誌開關。 <span class="tag dbg">未使用</span></td></tr><tr><td class="nw"><code>my-module-id</code></td><td>（空）</td><td>MOD_TCPD_FAST</td><td>舊版模組名稱。 <span class="tag dbg">未使用</span></td></tr><tr><td class="nw"><code>ring-name / ring-name-out</code></td><td>（空）</td><td>PICK_RING / EEW_RING</td><td>舊版共享記憶體環名稱。 <span class="tag dbg">未使用</span></td></tr></tbody>
+  </table></div>
+</section>
+
+<!-- ============ 監控與部署 ============ -->
+<section id="ops">
+  <h2>監控與部署</h2>
+
+  <h3>Prometheus 指標</h3>
+  <p>端點是 <code>http://主機:8080/metrics</code>，位址由 <code>metrics-addr</code> 決定。</p>
+  <div class="tw"><table>
+    <thead><tr><th>指標</th><th>類型</th><th>說明</th></tr></thead>
+    <tbody>
+      <tr><td><code>eew_pick_receiver_connections_active</code></td><td>Gauge</td><td>目前上游連線數。</td></tr>
+      <tr><td><code>tcpd_pickreceiver_upstream_healthy</code></td><td>Gauge</td><td>上游健康狀態，1 正常、0 逾時。</td></tr>
+      <tr><td><code>tcpd_pickreceiver_upstream_last_active_timestamp</code></td><td>Gauge</td><td>最後收到 pick 或心跳的 Unix 時間。</td></tr>
+      <tr><td><code>eew_pick_receiver_parsed_total{status}</code></td><td>Counter</td><td>pick 解析次數，<code>status</code> 為 <code>success</code> 或 <code>failed</code>。</td></tr>
+      <tr><td><code>eew_pick_receiver_heartbeats_sent_total</code></td><td>Counter</td><td>回送給上游的心跳數；目前流程不啟用，會維持 0。</td></tr>
+      <tr><td><code>eew_sender_connected</code></td><td>Gauge</td><td>與下游的連線狀態，1 或 0。</td></tr>
+      <tr><td><code>eew_sender_reconnects_total</code></td><td>Counter</td><td>重連嘗試次數。</td></tr>
+      <tr><td><code>eew_sender_reports_total</code></td><td>Counter</td><td>已送出的速報數。</td></tr>
+      <tr><td><code>eew_sender_heartbeats_total</code></td><td>Counter</td><td>已送出的心跳數。</td></tr>
+      <tr><td><code>eew_engine_process_duration_seconds</code></td><td>Histogram</td><td>處理一筆 pick 的耗時，桶界 1 ms 到 1 s。</td></tr>
+      <tr><td><code>eew_engine_pro_time_seconds{report_num}</code></td><td>Histogram</td><td>發震時間到報告產生的時間差，依報告序號分組，桶界 0.5 到 10 s。</td></tr>
+      <tr><td><code>eew_engine_channel_depth</code></td><td>Gauge</td><td><code>pickCh</code> 目前排隊的 pick 數；持續偏高代表引擎跟不上。</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>埠一覽</h3>
+  <div class="tw"><table>
+    <thead><tr><th>埠</th><th>用途</th><th>方向</th></tr></thead>
+    <tbody>
+      <tr><td class="nw">16001</td><td>接收 pick（<code>pick-listen-addr</code>）</td><td>上游連入</td></tr>
+      <tr><td class="nw">16002</td><td>送出速報（<code>eew-send-addr</code>）</td><td>連往下游</td></tr>
+      <tr><td class="nw">8080</td><td>Prometheus 指標（<code>metrics-addr</code>）</td><td>被抓取</td></tr>
+      <tr><td class="nw">9090 / 3100 / 3000</td><td>Prometheus / Loki / Grafana（docker-compose）</td><td>—</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>建置與映像</h3>
+<pre><code>cd TCPD_Source/src
+go build -o tcpd-fast ./cmd/tcpd-fast/
+./tcpd-fast -c tcpd_fast.yaml
+
+# 容器映像
+bash TCPD_Source/pod/build/createimage.sh</code></pre>
+  <p><code>createimage.sh</code> 以 <code>CGO_ENABLED=0 GOOS=linux</code> 編譯（基底映像是 alpine / musl，不能含 cgo），再用 podman 建出 <code>eew-tcpd:latest</code>。映像基於 <code>alpine:3.19</code>，時區 <code>Asia/Taipei</code>，執行檔在 <code>/opt/eew-tcpd/bin/tcpd-fast</code>，對外埠 16001 與 8080。映像不含設定檔，執行時要把 YAML 掛到 <code>/opt/eew-tcpd/tcpd_fast.yaml</code>，或用 <code>-c</code> 指定。</p>
+  <p>監控堆疊用 <code>docker-compose.yaml</code> 啟動：Prometheus v2.45.0（每 5 秒抓取）、Loki 2.8.2、Promtail 2.8.2、Grafana 9.5.2。Grafana 管理員密碼取自 <code>.env</code> 的 <code>GRAFANA_ADMIN_PASSWORD</code>。</p>
+</section>
+
+<!-- ============ 待確認 ============ -->
+<section id="issues">
+  <h2>待確認事項</h2>
+  <p>以下是閱讀原始碼時發現的不一致或值得確認的行為，尚未實際編譯或執行驗證。可對照需求逐項決定要不要修改。</p>
+  <div class="tw"><table>
+    <thead><tr><th class="num">#</th><th>類別</th><th>內容</th></tr></thead>
+    <tbody>
+      <tr class="grp"><td colspan="3">建置與測試</td></tr>
+      <tr><td class="num">1</td><td class="nw">相依缺失</td><td><code>go.mod</code> 以 <code>replace</code> 指向 <code>../go-earthworm-connect</code>，該目錄不在專案資料夾內，目前無法編譯。</td></tr>
+      <tr><td class="num">2</td><td class="nw">go.mod</td><td><code>config.go</code> 匯入 <code>gopkg.in/yaml.v3</code>，但 <code>go.mod</code> 沒有直接列出（只出現在 <code>go.sum</code>）。建議執行 <code>go mod tidy</code> 確認。</td></tr>
+      <tr><td class="num">3</td><td class="nw">測試</td><td><code>receiver_test.go</code> 以 4 個參數呼叫 <code>New</code>，現行簽章是 5 個，無法編譯。</td></tr>
+      <tr><td class="num">4</td><td class="nw">測試</td><td><code>config_test.go</code> 的測試內容仍是舊版 <code>.d</code> 鍵值格式，而 <code>ParseFile</code> 只解析 YAML，預期失敗。</td></tr>
+      <tr><td class="num">5</td><td class="nw">設定檔</td><td><code>src/etc/tcpd_fast.d</code> 是舊格式，目前無法被讀取。</td></tr>
+      <tr><td class="num">6</td><td class="nw">測試</td><td><code>engine.go</code>（事件狀態機）沒有單元測試。</td></tr>
+      <tr class="grp"><td colspan="3">部署與設定</td></tr>
+      <tr><td class="num">7</td><td class="nw">compose</td><td><code>docker-compose.yaml</code> 掛載 <code>./config/prometheus.yml</code> 與 <code>./config/promtail-config.yaml</code>，實際檔案在 <code>./monitoring/</code>。</td></tr>
+      <tr><td class="num">8</td><td class="nw">日誌收集</td><td>Promtail 只收 <code>service/*.log</code>，包含發報紀錄的 event 日誌與 network 日誌不會進 Loki。</td></tr>
+      <tr><td class="num">9</td><td class="nw">隨附設定</td><td><code>active-parr-win: 300</code> 是測試值（註解寫正式 45）；<code>eew-output-dir</code> 是 WSL 風格路徑；<code>.env</code> 的 Grafana 密碼是預設 <code>admin</code>。</td></tr>
+      <tr><td class="num">10</td><td class="nw">設定</td><td>專案根目錄與 <code>src/etc/</code> 各有一份相同的 <code>tcpd_fast.yaml</code>，需自行保持同步。</td></tr>
+      <tr class="grp"><td colspan="3">程式行為</td></tr>
+      <tr><td class="num">11</td><td class="nw">設定</td><td><code>log-file</code>、<code>show-report</code>、<code>ignore-weight-s</code>、<code>my-module-id</code>、<code>ring-name</code>、<code>ring-name-out</code> 只被解析，沒有被使用。</td></tr>
+      <tr><td class="num">12</td><td class="nw">寫死規則</td><td>特殊測站權重門檻、13 個保留前綴、最少站數、60 秒逾時、11 份上限、Averr 與 Avwei 判斷、共站距離、22 個場址係數都寫在程式碼裡。若需求要求可調，需改成設定項。</td></tr>
+      <tr><td class="num">13</td><td class="nw">定位</td><td>標準模式的剔除條件是 <code>0.1 ≤ Averr ≤ 0.8</code>。<code>Averr</code> 小於 0.1（擬合極佳）時也會一直剔除測站，請確認是否符合原 C 版行為。</td></tr>
+      <tr><td class="num">14</td><td class="nw">pick 解析</td><td><code>upd_sec</code> 超出 0–14 會讓 <code>Pd[upd_sec]</code> 越界；數值轉換錯誤被忽略成 0。</td></tr>
+      <tr><td class="num">15</td><td class="nw">輸出欄位</td><td>速報 <code>n_mag</code>、<code>.rep</code> 的 <code>Mpd_s</code>、<code>Mpv</code>、<code>MPv</code> 固定為 0；<code>.rep</code> 發震行表頭有 <code>first_ptime</code>，資料行沒有對應值。</td></tr>
+      <tr><td class="num">16</td><td class="nw">緩衝區</td><td>1000 個槽全滿時，新 pick 被靜默丟棄，沒有日誌也沒有指標。</td></tr>
+      <tr><td class="num">17</td><td class="nw">term-num</td><td>因 11 份上限，<code>term-num</code> 設成 11 以上時永遠不會生效。</td></tr>
+      <tr><td class="num">18</td><td class="nw">事件重置</td><td>重置時整批清空 pick，不分屬於哪個地震。</td></tr>
+      <tr><td class="num">19</td><td class="nw">重算時機</td><td><code>maxSta</code> 在計算前就更新；計算被站數或品質檢查擋下後，要等觸發站數再增加才會重試。</td></tr>
+      <tr><td class="num">20</td><td class="nw">下游斷線</td><td>斷線期間的速報不暫存、不補送。</td></tr>
+      <tr><td class="num">21</td><td class="nw">指標</td><td><code>tcpd_pickreceiver_upstream_healthy</code> 是全域單一 Gauge，多個監聽位址時，任一連線逾時都會把它設成 0。</td></tr>
+      <tr><td class="num">22</td><td class="nw">程式碼</td><td><code>buildEWFrame</code> 在 <code>eewsender</code> 與 <code>pickreceiver</code> 各有一份相同實作。</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<footer>依 TCPD_Source 原始碼整理，數值與格式來自程式碼與隨附設定檔。範例資料為示意，不是真實事件。</footer>
+
+</main>
+</div>
+</div>
+
+<script>
+(function(){
+  // contents list: highlight the section in view; smooth in-page jumps
+  try{
+    var links=[].slice.call(document.querySelectorAll('.toc a'));
+    var map={};
+    links.forEach(function(a){
+      map[a.getAttribute('href').slice(1)]=a;
+      a.addEventListener('click',function(ev){
+        var el=document.getElementById(a.getAttribute('href').slice(1));
+        if(el&&el.scrollIntoView){ev.preventDefault();el.scrollIntoView({behavior:'smooth',block:'start'});}
+      });
+    });
+    var secs=[].slice.call(document.querySelectorAll('main>section[id]'));
+    if('IntersectionObserver' in window){
+      var io=new IntersectionObserver(function(es){
+        es.forEach(function(e){
+          if(e.isIntersecting){
+            links.forEach(function(l){l.removeAttribute('aria-current');});
+            var a=map[e.target.id]; if(a){a.setAttribute('aria-current','true');}
+          }
+        });
+      },{rootMargin:'-15% 0px -75% 0px'});
+      secs.forEach(function(s){io.observe(s);});
+    }
+  }catch(e){}
+
+  // single-station magnitude calculator (same formulas as mpd1 / CalTc in magnitude.go)
+  try{
+    var COEF={'2':[5.000,1.102,1.737],'1':[5.067,1.281,1.760],'3':[4.811,1.089,1.738]};
+    var $=function(id){return document.getElementById(id);};
+    function f2(x){return (isFinite(x)?x:0).toFixed(2);}
+    function calc(){
+      var inst=$('c-inst').value, pd=parseFloat($('c-pd').value), dis=parseFloat($('c-dis').value),
+          dep=parseFloat($('c-dep').value), tc=parseFloat($('c-tc').value);
+      if(!isFinite(dis)||!isFinite(dep)){ $('o-r').textContent='—'; $('o-mpd').textContent='—'; $('o-mtc').textContent='—'; return; }
+      var R=Math.sqrt(dep*dep+dis*dis+0.000001);
+      var c=COEF[inst];
+      var mpd=(isFinite(pd)&&pd>0&&R>0)?(c[0]+c[1]*Math.log10(pd)+c[2]*Math.log10(R)):0;
+      var mtc=(isFinite(tc)&&tc>0)?(4.218*Math.log10(tc)+6.166):0;
+      $('o-r').textContent=R.toFixed(1);
+      $('o-mpd').textContent=f2(mpd);
+      $('o-mtc').textContent=f2(mtc);
+      var h='數值依程式的 mpd1() 與 CalTc() 計算；Pd 與 Tc 為 0 或負數時，程式回傳 0。';
+      if(mpd<=0&&isFinite(pd)&&pd>0){h='這個 Mpd 小於等於 0，程式不會把它納入平均。';}
+      $('o-hint').textContent=h;
+    }
+    ['c-inst','c-pd','c-dis','c-dep','c-tc'].forEach(function(id){
+      var el=$(id); if(el){el.addEventListener('input',calc);el.addEventListener('change',calc);}
+    });
+    calc();
+  }catch(e){}
+})();
+
+</script>
+</body>
+</html>
